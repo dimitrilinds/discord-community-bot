@@ -1,16 +1,19 @@
 {
-  "name": "discord-bot",
-  "version": "1.0.0",
+  "name": "ds6-community-bot",
+  "version": "3.0.0",
+  "description": "DS6 Bot - Bot completo de comunidad para Discord con moderación, economía, niveles, diversión y más.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
+  "keywords": ["discord", "bot", "community", "moderation", "economy"],
+  "author": "Daddy (daddy.vu) - Senior Developer & Fundador de DS6",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
-    "axios": "^1.16.0",
     "discord.js": "^14.26.4"
   }
 }
