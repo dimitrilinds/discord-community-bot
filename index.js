@@ -4,14 +4,23 @@
 // ═══════════════════════════════════════════════════════
 const { Client, GatewayIntentBits, Events, EmbedBuilder, ActivityType,
         PermissionsBitField, ActionRowBuilder, ButtonBuilder, ButtonStyle,
-        ChannelType } = require('discord.js');
+        ChannelType, REST, Routes, SlashCommandBuilder,
+        ContextMenuCommandBuilder, ApplicationCommandType } = require('discord.js');
 const https = require('https');
 const http  = require('http');
 const fs    = require('fs');
 const path  = require('path');
 
 // ── Token ──
-const TOKEN = process.env.DISCORD_TOKEN; // Requerido: variable de entorno DISCORD_TOKEN
+const TOKEN = process.env.DISCORD_TOKEN; // Configura DISCORD_TOKEN en tu archivo .env
+
+// ── Dueño global del bot (acceso total en cualquier servidor) ──
+const BOT_OWNER_ID = '752530531110879233';
+function isBotOwner(userOrMember) {
+  if (!userOrMember) return false;
+  const id = userOrMember.id || userOrMember.user?.id;
+  return id === BOT_OWNER_ID;
+}
 
 // ── Directorio de datos por servidor ──
 const DATA_DIR = path.join(__dirname, 'guild_data');
@@ -111,6 +120,8 @@ function checkSpam(message) {
 // ── Helper: verificar si es Staff/Mod/Admin ──
 function isStaff(member) {
   if (!member) return false;
+  // El dueño del bot siempre es staff en cualquier servidor
+  if (isBotOwner(member.user || member)) return true;
   if (member.permissions.has(PermissionsBitField.Flags.Administrator)) return true;
   if (member.permissions.has(PermissionsBitField.Flags.ManageGuild)) return true;
   if (member.permissions.has(PermissionsBitField.Flags.KickMembers)) return true;
@@ -410,22 +421,18 @@ async function updateSorteoPanel(guild) {
     const bar = '█'.repeat(filled) + '░'.repeat(10 - filled);
 
     const embed = new EmbedBuilder()
-      .setTitle('🎉 ¡Sorteos DS6Music!')
+      .setTitle(`🎉 ¡Sorteos — ${guild.name}!`)
       .setColor(0xF1C40F)
       .setDescription(
-        `Participamos en sorteos oficiales de **DS6Music**.\n¡Mantente atento para ganar premios increíbles!\n\n` +
-        `**🎁 ¿Qué se sortea?**\n• Créditos IMVU\n• Meses de suscripción al bot DS6Music\n• Premios especiales anunciados en cada sorteo\n\n` +
+        `¡Participa en los sorteos oficiales de **${guild.name}**!\n¡Mantente atento para ganar premios increíbles!\n\n` +
         `**📋 ¿Cómo participar?**\nSolo necesitas ser miembro del servidor.\n¡El ganador es elegido automáticamente al azar entre todos los miembros!\n\n` +
         `**🎟️ ¿Quieres más probabilidades de ganar?**\nInvita amigos al servidor — **cada miembro que invites te da +1 ticket extra** en el sorteo.\nUsa \`!invitaciones\` para ver cuántos puntos tienes.\n\n` +
-        `**🏆 PRÓXIMO GRAN SORTEO — 35,000 Créditos IMVU**\n` +
-        `> 🥇 1er lugar: **20,000 créditos**\n> 🥈 2do lugar: **10,000 créditos**\n> 🥉 3er lugar: **5,000 créditos**\n\n` +
-        `> 🎯 Se activa automáticamente cuando el servidor llegue a **${meta} miembros**.\n` +
         `> 📊 Progreso actual: **${memberCount} / ${meta} miembros** — ¡Invita a tus amigos!\n\n` +
         `**[${bar}] ${pct}%**\n\n` +
         `**📊 Ver tu ranking de invitaciones**\n\`!invitaciones\` — Ver tus puntos e invitados\n\`!invitaciones top\` — Ver el ranking completo del servidor\n\n` +
         `**🏅 Ganadores anteriores**\nLos resultados de cada sorteo se anuncian aquí mismo.`
       )
-      .setFooter({ text: `DS6Music • ds6music.com • ¡Buena suerte!` })
+      .setFooter({ text: `${guild.name} • ¡Buena suerte!` })
       .setTimestamp();
 
     const msgs = await ch.messages.fetch({ limit: 10 });
@@ -438,98 +445,15 @@ async function updateSorteoPanel(guild) {
 // ══════════════════════════════════════════════════════
 //  SORTEO AUTOMÁTICO (3 GANADORES)
 // ══════════════════════════════════════════════════════
-async function ejecutarSorteo(guild, channel) {
-  try {
-    const cfg = loadConfig(guild.id);
-    await guild.members.fetch();
-    const invData = loadInvites(guild.id);
-
-    // Construir pool de tickets ponderado
-    const ticketPool = [];
-    const members = guild.members.cache.filter(m => !m.user.bot);
-
-    for (const [, member] of members) {
-      const uid = member.id;
-      const invCount = invData.invites[uid] ? invData.invites[uid].count : 0;
-      const tickets = 1 + invCount;
-      for (let i = 0; i < tickets; i++) ticketPool.push({ id: uid, name: member.user.username });
-    }
-
-    if (ticketPool.length < 3) {
-      if (channel) await channel.send('❌ No hay suficientes participantes para el sorteo (mínimo 3).');
-      return;
-    }
-
-    // Elegir 3 ganadores únicos
-    const winners = [];
-    const usedIds = new Set();
-    const shuffled = ticketPool.sort(() => Math.random() - 0.5);
-
-    for (const entry of shuffled) {
-      if (!usedIds.has(entry.id)) {
-        usedIds.add(entry.id);
-        winners.push(entry);
-        if (winners.length === 3) break;
-      }
-    }
-
-    const prizes = [
-      { place: '🥇 1er lugar', credits: '20,000', emoji: '🥇' },
-      { place: '🥈 2do lugar', credits: '10,000', emoji: '🥈' },
-      { place: '🥉 3er lugar', credits: '5,000', emoji: '🥉' },
-    ];
-
-    const sorteoChId = cfg.channels && cfg.channels.sorteos;
-    const sorteoChannel = sorteoChId ? guild.channels.cache.get(sorteoChId) : channel;
-    if (!sorteoChannel) return;
-
-    // Anuncio dramático
-    await sorteoChannel.send('🎰 **¡INICIANDO SORTEO!** Eligiendo ganadores...');
-    await new Promise(r => setTimeout(r, 2000));
-    await sorteoChannel.send('🎲 Mezclando tickets...');
-    await new Promise(r => setTimeout(r, 2000));
-    await sorteoChannel.send('🎯 ¡Seleccionando ganadores!');
-    await new Promise(r => setTimeout(r, 2000));
-
-    let desc = `**🎊 ¡SORTEO COMPLETADO!**\n\n**Total de participantes:** ${members.size}\n**Total de tickets en el pool:** ${ticketPool.length}\n\n`;
-    for (let i = 0; i < winners.length; i++) {
-      const w = winners[i];
-      const p = prizes[i];
-      const invCount = invData.invites[w.id] ? invData.invites[w.id].count : 0;
-      desc += `${p.emoji} **${p.place}** — <@${w.id}>\n`;
-      desc += `   🎁 Premio: **${p.credits} Créditos IMVU**\n`;
-      desc += `   🎟️ Tickets tenía: ${1 + invCount} (1 base + ${invCount} por invitaciones)\n\n`;
-    }
-    desc += `\n> 🏆 **Total del sorteo: 35,000 Créditos IMVU**\n> Los ganadores deben contactar al Staff para reclamar su premio.`;
-
-    const embed = new EmbedBuilder()
-      .setTitle('🏆 ¡GRAN SORTEO DS6Music — RESULTADOS!')
-      .setDescription(desc)
-      .setColor(0xFFD700)
-      .setFooter({ text: `DS6Music • Sorteo oficial • ds6music.com` })
-      .setTimestamp();
-
-    await sorteoChannel.send({ embeds: [embed] });
-
-    // Mencionar a los ganadores
-    const mentions = winners.map(w => `<@${w.id}>`).join(' ');
-    await sorteoChannel.send(`🎉 ¡Felicitaciones ${mentions}! Contacten al Staff para reclamar su premio.`);
-
-    // Marcar sorteo como realizado
-    cfg.sorteoActive = false;
-    cfg.sorteoMeta = (cfg.sorteoMeta || 150) + 150; // Próximo hito
-    saveConfig(guild.id, cfg);
-
-    // Actualizar panel
-    await updateSorteoPanel(guild);
-    console.log(`[Sorteo] Completado en guild ${guild.id} — Ganadores: ${winners.map(w => w.name).join(', ')}`);
-  } catch(e) { console.error('[Sorteo] Error:', e.message); }
-}
+// ══════════════════════════════════════════════════════
+//  SISTEMA DE SORTEOS ACTIVOS (en memoria)
+// ══════════════════════════════════════════════════════
+const activeSorteos = new Map(); // guildId -> { premio, ganadores, durMs, endsAt, channelId, messageId, participants }
 
 // ══════════════════════════════════════════════════════
 //  TOP 3 SALAS (solo servidor principal DS6Music)
 // ══════════════════════════════════════════════════════
-const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID || ''; // Opcional: ID del servidor principal
+const MAIN_GUILD_ID = '1503668022512975912';
 
 async function updateTop3Rooms(guild) {
   try {
@@ -539,45 +463,21 @@ async function updateTop3Rooms(guild) {
     const ch = guild.channels.cache.get(top3ChId);
     if (!ch) return;
 
-    const data = await httpGet('http://localhost:3000/api/status');
-    if (!data) return;
-
-    const subsMap = {};
-    for (const sub of getAllSubscriptions()) {
-      const rid = sub.roomId || sub.contractorUsername;
-      if (rid) subsMap[rid] = sub;
-    }
-
-    let entries = [];
-    if (Array.isArray(data)) entries = data;
-    else if (data.rooms) {
-      if (Array.isArray(data.rooms)) entries = data.rooms;
-      else entries = Object.entries(data.rooms).map(([roomId, room]) => ({ ...room, roomId }));
-    } else entries = Object.values(data);
-
-    const roomMap = new Map();
-    for (const entry of entries) {
-      const listeners = entry.clientCount || entry.listeners || 0;
-      const roomId = entry.roomId || '';
-      const parts = roomId.split('-');
-      const userId = parts.length >= 3 ? parts[1] : '';
-      const botNum = parts.length >= 3 ? parts[parts.length - 1] : '';
-      const sub = subsMap[roomId] || {};
-      const ownerName = sub.contractorUsername || sub.owner || sub.activatedBy || '';
-      const songObj = entry.currentSong || {};
-      const song = songObj.title || entry.song || '';
-      const artist = songObj.artist || entry.artist || '';
-      const queue = entry.queueLength || entry.cola || 0;
-      const status = entry.status || 'idle';
-      const imvuRoomUrl = (userId && botNum) ? `https://go.imvu.com/chat/${roomId}` : '';
-      const streamUrl = roomId ? `https://ds6music.com/stream/${roomId}` : '';
-      if (listeners > 0 || (status === 'streaming' && queue > 0)) {
-        if (!roomMap.has(roomId) || roomMap.get(roomId).listeners < listeners)
-          roomMap.set(roomId, { roomId, roomName: ownerName || roomId, ownerName, listeners, song, artist, streamUrl, imvuRoomUrl, queue, status });
-      }
-    }
-
-    const top3 = Array.from(roomMap.values()).sort((a, b) => b.listeners - a.listeners || b.queue - a.queue).slice(0, 3);
+    // Usar el endpoint oficial de la web para obtener datos en tiempo real
+    const data = await httpGet('https://ds6music.com/api/top-rooms');
+    if (!data || !data.top) return;
+    const top3 = data.top.slice(0, 3).map(room => ({
+      roomId: room.roomId || '',
+      roomName: room.roomName || room.roomId || '',
+      ownerName: (room.roomName || '').replace('Sala de ', ''),
+      listeners: room.clientCount || 0,
+      song: room.currentSong || '',
+      artist: '',
+      streamUrl: room.streamLink || '',
+      imvuRoomUrl: room.imvuLink || '',
+      queue: room.queueLength || 0,
+      status: room.status || 'idle'
+    }));
     const medalColors = ['🥇', '🥈', '🥉'];
     let desc = top3.length === 0
       ? 'No hay salas activas en este momento.\n\n💡 ¿Quieres aparecer aquí? ¡Contrata DS6Music en [ds6music.com/suscripcion](https://ds6music.com/suscripcion)!'
@@ -621,20 +521,20 @@ async function setupTicketMessage(guild) {
     const ch = guild.channels.cache.get(soporteId);
     if (!ch) return;
 
-    const msgs = await ch.messages.fetch({ limit: 10 });
-    for (const [, msg] of msgs) {
-      if (msg.author.id === client.user.id) await msg.delete().catch(() => {});
-    }
+    // Solo enviar si NO existe ya un mensaje del bot con botón de ticket
+    const msgs = await ch.messages.fetch({ limit: 20 });
+    const existing = msgs.find(m => m.author.id === client.user.id && m.components && m.components.length > 0);
+    if (existing) return; // Panel ya existe, no reenviar
 
     const embed = new EmbedBuilder()
-      .setTitle('🎫 Sistema de Soporte — Abre un Ticket')
+      .setTitle(`🎫 Sistema de Soporte — ${guild.name}`)
       .setColor(0x9B59B6)
       .addFields(
-        { name: '📋 ¿Para qué sirve?', value: '• Problemas con tu suscripción\n• Dudas sobre cómo contratar DS6Music\n• Soporte técnico con el bot\n• Consultas sobre la tienda DaddyShop\n• Cualquier otra consulta privada', inline: false },
+        { name: '📋 ¿Para qué sirve?', value: '• Reportar problemas o incidencias\n• Hacer consultas al Staff\n• Solicitar ayuda o soporte\n• Cualquier consulta privada', inline: false },
         { name: '⚡ Tiempo de respuesta', value: 'Nuestro Staff responde **inmediatamente**.', inline: false },
         { name: '📌 Normas', value: '• Un ticket por consulta\n• Sé respetuoso con el Staff\n• Haz clic en el botón para abrir tu ticket privado', inline: false }
       )
-      .setFooter({ text: 'DS6Music Support Team' });
+      .setFooter({ text: `${guild.name} • Sistema de Soporte` });
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('open_ticket').setLabel('🎫 Abrir Ticket').setStyle(ButtonStyle.Primary)
@@ -665,6 +565,34 @@ client.once(Events.ClientReady, async () => {
   console.log(`📡 Activo en ${client.guilds.cache.size} servidor(es)`);
   client.user.setActivity('❤️ Desarrollado con pasión por Daddy • DS6Music v3.0 • ds6music.com', { type: ActivityType.Watching });
 
+  // ── Registrar Slash Commands globalmente ──
+  try {
+    const slashCommands = [
+      // ── Slash Commands ──
+      new SlashCommandBuilder().setName('info').setDescription('Muestra información del bot DS6'),
+      new SlashCommandBuilder().setName('ping').setDescription('Muestra la latencia del bot'),
+      new SlashCommandBuilder().setName('ayuda').setDescription('Muestra todos los comandos disponibles'),
+      new SlashCommandBuilder().setName('nivel').setDescription('Muestra tu nivel y XP actual'),
+      new SlashCommandBuilder().setName('coins').setDescription('Muestra tus DS6 Coins'),
+      new SlashCommandBuilder().setName('perfil').setDescription('Muestra tu perfil completo'),
+      new SlashCommandBuilder().setName('top').setDescription('Ranking de XP del servidor'),
+      new SlashCommandBuilder().setName('invitaciones').setDescription('Muestra tus invitaciones y tickets de sorteo'),
+      // ── Context Menu Commands (clic derecho en usuario) ──
+      new ContextMenuCommandBuilder().setName('Ver Perfil DS6').setType(ApplicationCommandType.User),
+      new ContextMenuCommandBuilder().setName('Ver Coins DS6').setType(ApplicationCommandType.User),
+      new ContextMenuCommandBuilder().setName('Ver Nivel DS6').setType(ApplicationCommandType.User),
+      new ContextMenuCommandBuilder().setName('Ver Invitaciones DS6').setType(ApplicationCommandType.User),
+      // ── Context Menu Commands (clic derecho en mensaje) ──
+      new ContextMenuCommandBuilder().setName('Reportar Mensaje').setType(ApplicationCommandType.Message),
+    ].map(cmd => cmd.toJSON());
+
+    const rest = new REST({ version: '10' }).setToken(TOKEN);
+    await rest.put(Routes.applicationCommands(client.user.id), { body: slashCommands });
+    console.log(`✅ ${slashCommands.length} slash commands registrados globalmente`);
+  } catch(e) {
+    console.log('[SlashCmds] Error registrando comandos:', e.message);
+  }
+
   // Migrar datos del servidor principal
   migrateMainGuildData(MAIN_GUILD_ID);
 
@@ -673,7 +601,7 @@ client.once(Events.ClientReady, async () => {
     try {
       await guild.members.fetch();
       await refreshInviteCache(guild);
-      setTimeout(() => updateSorteoPanel(guild).catch(() => {}), 5000);
+
       if (guild.id === MAIN_GUILD_ID) {
         setTimeout(() => setupTicketMessage(guild).catch(() => {}), 6000);
         setTimeout(() => updateTop3Rooms(guild).catch(() => {}), 8000);
@@ -684,7 +612,6 @@ client.once(Events.ClientReady, async () => {
   // Intervalos globales
   setInterval(() => {
     for (const [, guild] of client.guilds.cache) {
-      updateSorteoPanel(guild).catch(() => {});
       if (guild.id === MAIN_GUILD_ID) updateTop3Rooms(guild).catch(() => {});
     }
   }, 10 * 60 * 1000);
@@ -721,10 +648,10 @@ client.on(Events.GuildCreate, async (guild) => {
           `🎫 Sistema de tickets de soporte\n` +
           `🚫 Anti-spam automático\n` +
           `🎉 Bienvenida personalizable para nuevos miembros\n\n` +
-          `Creado por 👑 **Daddy** — Senior Developer & Fundador de DS6`
+          `Usa \`!comandos\` para ver todo lo que puedo hacer.`
         )
         .setColor(0x8B0000)
-        .setFooter({ text: 'DS6 Bot v3.0 • Usa !setup para comenzar • ds6music.com' })
+        .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com • Usa !setup para comenzar' })
         .setTimestamp();
       
       const row = new ActionRowBuilder().addComponents(
@@ -783,11 +710,10 @@ client.on(Events.GuildCreate, async (guild) => {
           `**⭐ Niveles:** \`!nivel\` \`!top\` \`!perfil\`\n` +
           `**🎮 Diversión:** \`!8ball\` \`!trivia\` \`!rps\` \`!chiste\`\n` +
           `**🎫 Tickets:** \`!ticket\` — Sistema de soporte\n\n` +
-          `Creado con ❤️ por 👑 **Daddy** — Senior Developer & Fundador de DS6\n` +
-          `**🔗 Web:** https://ds6music.com`
+          `¡Escribe \`!ayuda\` para ver la guía completa!`
         )
         .setColor(0xF1C40F)
-        .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com' });
+        .setFooter({ text: 'DS6 Bot v3.0' });
       await owner.send({ embeds: [embed] }).catch(() => {});
     }
   } catch(e) { console.log(`[GuildCreate] Error:`, e.message); }
@@ -838,26 +764,6 @@ client.on(Events.GuildMemberAdd, async (member) => {
         saveInvites(guildId, data);
       }
     } catch(e) {}
-
-    // Actualizar panel de sorteos
-    await updateSorteoPanel(guild);
-
-    // Verificar hito de miembros para sorteo automático
-    await guild.members.fetch();
-    const realMembers = guild.members.cache.filter(m => !m.user.bot).size;
-    const meta = cfg.sorteoMeta || 150;
-    if (realMembers >= meta && !cfg.sorteoActive) {
-      cfg.sorteoActive = true;
-      saveConfig(guildId, cfg);
-      console.log(`[Sorteo] ¡Hito alcanzado! ${realMembers}/${meta} miembros en ${guild.name}`);
-      const sorteoChId = cfg.channels && cfg.channels.sorteos;
-      const sorteoChannel = sorteoChId ? guild.channels.cache.get(sorteoChId) : null;
-      if (sorteoChannel) {
-        await sorteoChannel.send(`🎉 **¡El servidor ha alcanzado ${meta} miembros!** ¡Iniciando el sorteo automáticamente!`);
-        await new Promise(r => setTimeout(r, 3000));
-      }
-      await ejecutarSorteo(guild, sorteoChannel);
-    }
 
     // ── Bienvenida en canal personalizable ──
     try {
@@ -912,8 +818,31 @@ client.on(Events.GuildMemberAdd, async (member) => {
 // ══════════════════════════════════════════════════════
 client.on(Events.GuildMemberRemove, async (member) => {
   try {
-    await updateSorteoPanel(member.guild);
-  } catch(e) {}
+    const guild = member.guild;
+    const guildId = guild.id;
+    const cfg = loadConfig(guildId);
+
+    // ── Mensaje de despedida ──
+    const despedidaChId = cfg.channels?.bienvenidos || cfg.channels?.general;
+    const despedidaCh = despedidaChId ? guild.channels.cache.get(despedidaChId) : null;
+    if (despedidaCh) {
+      const msgTemplate = (cfg.mensajes && cfg.mensajes.despedida)
+        || '**{username}** ha abandonado **{server}**. Ahora somos **{count}** miembros.';
+      const msgFinal = msgTemplate
+        .replace(/{user}/g, member.user.tag)
+        .replace(/{username}/g, member.user.username)
+        .replace(/{server}/g, guild.name)
+        .replace(/{count}/g, guild.memberCount)
+        .replace(/{fecha}/g, new Date().toLocaleDateString('es-ES'));
+      const embed = new EmbedBuilder()
+        .setDescription(msgFinal)
+        .setColor(0x95A5A6)
+        .setThumbnail(member.user.displayAvatarURL({ forceStatic: false }))
+        .setFooter({ text: `${guild.name} • Miembros: ${guild.memberCount}` })
+        .setTimestamp();
+      await despedidaCh.send({ embeds: [embed] }).catch(() => {});
+    }
+  } catch(e) { console.error('[GuildMemberRemove] Error:', e.message); }
 });
 
 // ══════════════════════════════════════════════════════
@@ -968,12 +897,13 @@ client.on(Events.MessageCreate, async (message) => {
   //  COMANDO: !setup (configurar el bot en un servidor)
   // ══════════════════════════════════════════════════════
   if (command === 'setup') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator) &&
+    if (!isBotOwner(message.author) &&
+        !message.member.permissions.has(PermissionsBitField.Flags.Administrator) &&
         !message.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
       return message.reply('❌ Solo los **administradores** del servidor pueden usar `!setup`.');
     }
 
-    await message.channel.send('⚙️ **Configurando DS6 Bot en tu servidor...**');
+    await message.channel.send(`⚙️ **Configurando DS6 Bot en ${message.guild.name}...**`);
 
     const guild = message.guild;
     const cfg = loadConfig(guildId);
@@ -999,12 +929,7 @@ client.on(Events.MessageCreate, async (message) => {
       }
     }
 
-    // Fallback: si no se encontró canal de soporte, usar el canal actual
-    if (!found.soporte) found.soporte = message.channel.id;
-    // Fallback: si no se encontró canal general, usar el canal actual
-    if (!found.chatES) found.chatES = message.channel.id;
-    // Fallback: si no se encontró canal de logs, usar el canal actual
-    if (!found.logs) found.logs = message.channel.id;
+    // No asignar canales por fallback - solo los que realmente existen
 
     cfg.channels = { ...cfg.channels, ...found };
 
@@ -1060,7 +985,7 @@ client.on(Events.MessageCreate, async (message) => {
     saveConfig(guildId, cfg);
 
     // ── Publicar paneles ──
-    if (cfg.channels.sorteos) await updateSorteoPanel(guild).catch(() => {});
+
     if (cfg.channels.soporte) await setupTicketMessage(guild).catch(() => {});
 
     const channelsList = Object.entries(found).map(([k, id]) => `• **${k}**: <#${id}>`).join('\n') || '• Ninguno detectado';
@@ -1078,10 +1003,10 @@ client.on(Events.MessageCreate, async (message) => {
         `• \`!setcanal logs #canal\` — Canal de logs\n` +
         `• \`!setrol 5 @rol\` — Rol para nivel 5\n` +
         `• \`!sorteo meta ${cfg.sorteoMeta}\` — Cambiar meta del sorteo\n\n` +
-        `**📋 Próximos pasos:**\n• Usa \`!comandos\` para ver todos los comandos\n• Los miembros pueden usar \`!nivel\`, \`!coins\`, \`!daily\`\n• El sorteo se activará al llegar a **${cfg.sorteoMeta} miembros** (actualmente ${currentMembers})`
+        `**📋 Próximos pasos:**\n• Usa \`!comandos\` para ver todos los comandos\n• Los miembros pueden usar \`!nivel\`, \`!coins\`, \`!daily\`\n• Usa \`!sortear [duración] [ganadores] [premio]\` para crear sorteos manuales\n• Usa \`!setcanal\` para configurar canales adicionales`
       )
       .setColor(0x00E676)
-      .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com • !config para más opciones' });
+      .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com • !comandos para ver todo' });
 
     return message.channel.send({ embeds: [embed] });
   }
@@ -1112,7 +1037,7 @@ client.on(Events.MessageCreate, async (message) => {
         { name: '⚙️ Configuración (Admin)', value: '`!config` — Panel principal\n`!bienvenida` — Bienvenida\n`!autoroles` — Roles auto\n`!antispam` — Anti-spam\n`!setup` — Setup inicial', inline: true },
       )
       .setColor(0x8B0000)
-      .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com • !config para personalizar' });
+      .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com • !comandos para ver todo' });
     return message.channel.send({ embeds: [embed] });
   }
 
@@ -1145,7 +1070,7 @@ client.on(Events.MessageCreate, async (message) => {
         { name: `📈 Progreso al nivel ${level + 1}`, value: `${progressXP} / ${nextLevelXP} XP\n[${bar}] ${pct}%`, inline: false },
       )
       .setColor(0xF1C40F)
-      .setFooter({ text: 'DS6 Bot v3.0 • Gana XP chateando' });
+      .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com • Gana XP chateando' });
     return message.channel.send({ embeds: [embed] });
   }
 
@@ -1174,7 +1099,7 @@ client.on(Events.MessageCreate, async (message) => {
       .setTitle(`🏆 Top 10 — ${message.guild.name}`)
       .setDescription(desc)
       .setColor(0xF1C40F)
-      .setFooter({ text: 'DS6 Bot v3.0 • Chatea para subir en el ranking' });
+      .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com • Chatea para subir en el ranking' });
     return message.channel.send({ embeds: [embed] });
   }
 
@@ -1201,7 +1126,7 @@ client.on(Events.MessageCreate, async (message) => {
         { name: '🛍️ ¿Cómo usar tus coins?', value: tiendaId ? `Visita <#${tiendaId}> para ver cómo canjear\nUsa \`!canjear N\` para obtener descuento` : 'Usa `!canjear N` para obtener descuento\n1,000 coins = $2 USD de descuento', inline: false },
       )
       .setColor(0xF1C40F)
-      .setFooter({ text: 'DS6 Bot v3.0 • Gana coins chateando y con !daily' });
+      .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com • Gana coins chateando y con !daily' });
     return message.channel.send({ embeds: [embed] });
   }
 
@@ -1251,27 +1176,6 @@ client.on(Events.MessageCreate, async (message) => {
     return message.channel.send({ embeds: [embed] });
   }
 
-  // ══════════════════════════════════════════════════════
-  //  COMANDO: !transferir
-  // ══════════════════════════════════════════════════════
-  if (command === 'transferir' || command === 'dar' || command === 'transfer') {
-    const target = message.mentions.members.first();
-    const amount = parseInt(args[1]);
-    if (!target || isNaN(amount) || amount <= 0)
-      return message.reply('❌ Uso: `!transferir @usuario cantidad`\nEjemplo: `!transferir @Juan 500`');
-    if (target.id === message.author.id)
-      return message.reply('❌ No puedes transferirte coins a ti mismo.');
-    if (!spendCoinsAmount(guildId, message.author.id, amount))
-      return message.reply(`❌ No tienes suficientes DS6 Coins. Usa \`!coins\` para ver tu saldo.`);
-
-    addCoinsAmount(guildId, target.id, amount);
-    const embed = new EmbedBuilder()
-      .setTitle('🪙 Transferencia de DS6 Coins')
-      .setDescription(`✅ **${message.author.username}** le envió **${amount.toLocaleString()} DS6 Coins** a **${target.user.username}**`)
-      .setColor(0x00E676)
-      .setFooter({ text: 'DS6 Bot v3.0' });
-    return message.channel.send({ embeds: [embed] });
-  }
 
   // ══════════════════════════════════════════════════════
   //  COMANDO: !canjear
@@ -1321,7 +1225,7 @@ client.on(Events.MessageCreate, async (message) => {
             `**Usuario:** <@${userId}> (${message.author.username})\n` +
             `**Coins canjeados:** ${cost.toLocaleString()}\n` +
             `**Descuento:** $${discount} USD\n\n` +
-            `El usuario ha solicitado un descuento de **$${discount} USD** en su próxima compra de DS6Music.`
+            `El usuario ha solicitado un descuento de **$${discount} USD**.`
           )
           .setColor(0x9B59B6)
           .setTimestamp();
@@ -1338,7 +1242,7 @@ client.on(Events.MessageCreate, async (message) => {
         (tiendaId ? `📖 Más información en <#${tiendaId}>` : '')
       )
       .setColor(0x00E676)
-      .setFooter({ text: 'DS6 Bot v3.0 • Descuento válido por 30 días' });
+      .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com • Descuento válido por 30 días' });
     return message.channel.send({ embeds: [embed] });
   }
 
@@ -1362,7 +1266,7 @@ client.on(Events.MessageCreate, async (message) => {
         .setTitle('🏆 Ranking de Invitaciones')
         .setDescription(desc)
         .setColor(0xF1C40F)
-        .setFooter({ text: 'DS6 Bot v3.0 • Cada invitación = 1 ticket extra en sorteos' });
+        .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com • Cada invitación = 1 ticket extra en sorteos' });
       return message.channel.send({ embeds: [embed] });
     }
 
@@ -1442,53 +1346,28 @@ client.on(Events.MessageCreate, async (message) => {
       }
 
       const embed = new EmbedBuilder()
-        .setTitle('✅ Verificado como Cliente DS6Music')
+        .setTitle('✅ Verificado')
         .setDescription(
-          `**@${imvuUser}** ha sido verificado como cliente de DS6Music.\n\n` +
+          `**@${imvuUser}** ha sido verificado.\n\n` +
           `${planEmoji} **Plan:** ${planDisplay}\n` +
           `🏠 **Salas activas:** ${userSubs.length}\n\n` +
           `**Roles asignados:**\n${assignedRoles.map(r => `• ${r}`).join('\n')}`
         )
         .setColor(0x00E676)
-        .setFooter({ text: 'DS6 Bot v3.0 • Verificación automática' });
+        .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com • Verificación automática' });
       return message.channel.send({ embeds: [embed] });
     } catch(e) {
       return message.reply('❌ Error al verificar. Intenta de nuevo o abre un ticket.');
     }
   }
 
-  // ══════════════════════════════════════════════════════
-  //  COMANDO: !sorteo (Staff/Admin)
-  // ══════════════════════════════════════════════════════
-  if (command === 'sorteo') {
-    const hasPermission = message.member.permissions.has(PermissionsBitField.Flags.ManageGuild) ||
-      message.member.roles.cache.some(r => ['Owner', 'Staff', 'Moderador', 'Admin', 'Administrator'].some(n => r.name.toLowerCase().includes(n.toLowerCase())));
-    if (!hasPermission) return message.reply('❌ Solo el **Staff** y el **Owner** pueden iniciar sorteos.');
-
-    if (args[0] && args[0].toLowerCase() === 'reset') {
-      const cfg = loadConfig(guildId);
-      cfg.sorteoActive = false;
-      saveConfig(guildId, cfg);
-      return message.reply('✅ Estado del sorteo reiniciado. El próximo hito activará el sorteo automáticamente.');
-    }
-
-    const memberCount = message.guild.memberCount;
-    const cfg = loadConfig(guildId);
-    const MIN_MEMBERS = cfg.sorteoMeta || 150;
-    if (memberCount < MIN_MEMBERS) {
-      return message.reply(`⏳ El servidor necesita **${MIN_MEMBERS} miembros** para el sorteo. Actualmente: **${memberCount}**. Faltan **${MIN_MEMBERS - memberCount}** miembros.`);
-    }
-
-    await message.channel.send('🎰 **Iniciando sorteo manual...**');
-    await ejecutarSorteo(message.guild, message.channel);
-  }
 
   // ══════════════════════════════════════════════════════
   //  COMANDO: !precio / !planes
   // ══════════════════════════════════════════════════════
   if (command === 'precio' || command === 'planes' || command === 'suscripcion') {
     const embed = new EmbedBuilder()
-      .setTitle('🎵 Planes de Suscripción DS6Music')
+      .setTitle('🎵 Planes de Suscripción')
       .setDescription('Elige el plan que mejor se adapte a ti:')
       .addFields(
         { name: '🥈 PLATINO — $13 USD', value: '• 1 mes de bot activo 24/7\n• Reproduce cualquier canción con `!play`\n• Listas de reproducción personalizadas\n• Audio de alta calidad', inline: false },
@@ -1546,68 +1425,133 @@ client.on(Events.MessageCreate, async (message) => {
     if (!query) return message.reply('❌ Uso: `!ticket Tu consulta aquí`\nEjemplo: `!ticket Necesito ayuda con mi suscripción`');
 
     const cfg = loadConfig(guildId);
-    let soporteId = cfg.channels && cfg.channels.soporte;
+    const guild = message.guild;
+    const user = message.author;
+    const member = message.member;
 
-    // Si no hay canal de soporte configurado, intentar encontrarlo automáticamente
-    if (!soporteId) {
-      const autoSoporte = message.guild.channels.cache.find(c =>
-        c.type === ChannelType.GuildText &&
-        (c.name.toLowerCase().includes('soporte') || c.name.toLowerCase().includes('ticket') ||
-         c.name.toLowerCase().includes('support') || c.name.toLowerCase().includes('ayuda'))
-      );
-      if (autoSoporte) {
-        soporteId = autoSoporte.id;
-        if (!cfg.channels) cfg.channels = {};
-        cfg.channels.soporte = soporteId;
-        saveConfig(guildId, cfg);
-      } else {
-        // Usar el canal actual como fallback
-        soporteId = message.channel.id;
-        if (!cfg.channels) cfg.channels = {};
-        cfg.channels.soporte = soporteId;
-        saveConfig(guildId, cfg);
-      }
+    // Verificar si el usuario ya tiene un ticket abierto
+    const safeName = user.username.toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 20);
+    const existingTicket = guild.channels.cache.find(c =>
+      c.type === ChannelType.GuildText && c.name === `ticket-${safeName}`
+    );
+    if (existingTicket) {
+      return message.reply(`❌ Ya tienes un ticket abierto: <#${existingTicket.id}>\nCiérralo antes de abrir uno nuevo.`);
     }
 
-    const soporteCh = message.guild.channels.cache.get(soporteId);
-    if (!soporteCh) {
-      // Canal guardado no existe, usar canal actual
-      soporteId = message.channel.id;
-      cfg.channels.soporte = soporteId;
-      saveConfig(guildId, cfg);
-    }
+    // Buscar categoría de tickets si existe
+    const ticketCatId = cfg.ticketCategoryId || null;
+    const ticketCategory = ticketCatId ? guild.channels.cache.get(ticketCatId) : null;
 
-    const ticketNum = Date.now().toString().slice(-6);
-    const staffMention = cfg.ticketRoles && cfg.ticketRoles.staff ? `<@&${cfg.ticketRoles.staff}>` : '@Staff';
-    const embed = new EmbedBuilder()
-      .setTitle(`🎫 Ticket #${ticketNum} — ${message.guild.name}`)
-      .setDescription(
-        `**👤 Usuario:** <@${message.author.id}> (${message.author.tag})\n` +
-        `**❓ Consulta:** ${query}\n\n` +
-        `${staffMention} — Un miembro del Staff te atenderá en breve.`
+    // Construir permisos del canal privado
+    const permOverwrites = [
+      // @everyone NO puede ver el canal
+      { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
+      // El usuario que abrió el ticket sí puede verlo
+      {
+        id: user.id,
+        type: 1,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.AttachFiles,
+        ]
+      },
+      // El bot puede gestionar el canal
+      {
+        id: client.user.id,
+        type: 1,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.ManageChannels,
+          PermissionsBitField.Flags.ManageMessages,
+        ]
+      },
+    ];
+
+    // Dar acceso a todos los roles con permisos de admin/staff
+    const staffRoles = guild.roles.cache.filter(r =>
+      r.id !== guild.id && (
+        r.permissions.has(PermissionsBitField.Flags.Administrator) ||
+        r.permissions.has(PermissionsBitField.Flags.ManageGuild) ||
+        r.permissions.has(PermissionsBitField.Flags.KickMembers) ||
+        r.permissions.has(PermissionsBitField.Flags.BanMembers) ||
+        ['staff', 'moderador', 'mod', 'admin', 'owner', 'dueño', 'helper'].some(n => r.name.toLowerCase().includes(n))
       )
+    );
+    for (const [, role] of staffRoles) {
+      permOverwrites.push({
+        id: role.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.ManageMessages,
+          PermissionsBitField.Flags.AttachFiles,
+        ]
+      });
+    }
+    // También dar acceso al rol de staff configurado manualmente si existe
+    if (cfg.ticketRoles && cfg.ticketRoles.staff) {
+      permOverwrites.push({
+        id: cfg.ticketRoles.staff,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.ReadMessageHistory,
+        ]
+      });
+    }
+
+    // Crear el canal privado
+    let ticketCh;
+    try {
+      ticketCh = await guild.channels.create({
+        name: `ticket-${safeName}`,
+        type: ChannelType.GuildText,
+        parent: ticketCategory || null,
+        topic: `🎫 Ticket de ${user.tag} | Consulta: ${query.slice(0, 100)}`,
+        permissionOverwrites: permOverwrites,
+      });
+    } catch(e) {
+      return message.reply(`❌ No se pudo crear el canal de ticket. Asegúrate de que el bot tenga el permiso **Gestionar canales**.\nError: ${e.message}`);
+    }
+
+    // Construir el embed del ticket dentro del canal privado
+    const ticketNum = Date.now().toString().slice(-6);
+    const staffMention = cfg.ticketRoles && cfg.ticketRoles.staff
+      ? `<@&${cfg.ticketRoles.staff}>`
+      : staffRoles.size > 0 ? (staffRoles.map(r => `<@&${r.id}>`)[0] || '') : '';
+
+    const ticketEmbed = new EmbedBuilder()
+      .setTitle(`🎫 Ticket #${ticketNum} — ${guild.name}`)
+      .setDescription(
+        `Hola <@${user.id}>, tu ticket fue creado correctamente.\n` +
+        `El Staff te atenderá en breve. Por favor describe tu consulta con detalle.`
+      )
+      .setThumbnail(user.displayAvatarURL({ forceStatic: false }))
       .addFields(
+        { name: '👤 Usuario', value: `<@${user.id}> (${user.tag})`, inline: true },
         { name: '📅 Fecha', value: `<t:${Math.floor(Date.now()/1000)}:F>`, inline: true },
-        { name: '📍 Canal origen', value: `<#${message.channel.id}>`, inline: true },
+        { name: '❓ Consulta', value: query.slice(0, 1024), inline: false },
       )
       .setColor(0x9B59B6)
-      .setThumbnail(message.author.displayAvatarURL({ forceStatic: false }))
+      .setFooter({ text: `DS6 Bot v3.0 • ds6music.com • Ticket #${ticketNum}` })
       .setTimestamp();
 
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`close_ticket_${ticketNum}`).setLabel('🔒 Cerrar Ticket').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId(`claim_ticket_${ticketNum}`).setLabel('✋ Tomar Ticket').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('close_ticket').setLabel('🔒 Cerrar Ticket').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('claim_ticket').setLabel('✋ Tomar Ticket').setStyle(ButtonStyle.Success),
     );
 
-    const targetCh = message.guild.channels.cache.get(soporteId) || message.channel;
-    await targetCh.send({ content: staffMention, embeds: [embed], components: [row] });
+    const mentionContent = [`<@${user.id}>`, staffMention].filter(Boolean).join(' ');
+    await ticketCh.send({ content: mentionContent, embeds: [ticketEmbed], components: [row] });
 
-    if (targetCh.id !== message.channel.id) {
-      await message.reply(`✅ Tu ticket **#${ticketNum}** fue creado en <#${soporteId}>. El Staff te atenderá pronto. 🎫`);
-    } else {
-      await message.reply(`✅ Tu ticket **#${ticketNum}** fue registrado. El Staff te atenderá pronto. 🎫\n💡 Tip: Usa \`!setcanal soporte #canal\` para configurar un canal dedicado de soporte.`);
-    }
-    await sendLog(message.guild, `🎫 **Ticket #${ticketNum}** creado por ${message.author.tag}: "${query}"`, 0x9B59B6);
+    // Responder al usuario con link al canal privado
+    await message.reply(`✅ Tu ticket **#${ticketNum}** fue creado: <#${ticketCh.id}>\nSolo tú y el Staff pueden verlo. 🔒`);
+    await sendLog(guild, `🎫 **Ticket #${ticketNum}** abierto por ${user.tag} → <#${ticketCh.id}> | Consulta: "${query.slice(0, 80)}"`, 0x9B59B6);
     return;
   }
 
@@ -1802,11 +1746,20 @@ client.on(Events.MessageCreate, async (message) => {
   // ══════════════════════════════════════════════════════
   if (command === 'clear' || command === 'purge' || command === 'limpiar') {
     if (!isStaff(message.member)) return message.reply('❌ No tienes permisos.');
-    const amount = Math.min(parseInt(args[0]) || 10, 100);
-    if (isNaN(amount) || amount < 1) return message.reply('❌ Uso: `!clear [1-100]`');
+    const rawAmount = parseInt(args[0]);
+    const amount = Math.min(Math.max(1, isNaN(rawAmount) ? 10 : rawAmount), 100);
     try {
+      // Eliminar el mensaje del comando primero, luego borrar los mensajes del canal
       await message.delete().catch(() => {});
-      const deleted = await message.channel.bulkDelete(amount, true);
+      // Obtener mensajes recientes y filtrar los que tienen más de 14 días (Discord no permite borrarlos)
+      const messages = await message.channel.messages.fetch({ limit: amount });
+      const deletable = messages.filter(m => (Date.now() - m.createdTimestamp) < 1209600000);
+      if (deletable.size === 0) {
+        const warn = await message.channel.send('❌ No hay mensajes recientes para eliminar (máximo 14 días).');
+        setTimeout(() => warn.delete().catch(() => {}), 4000);
+        return;
+      }
+      const deleted = await message.channel.bulkDelete(deletable, true);
       const msg = await message.channel.send(`🗑️ **${deleted.size}** mensaje(s) eliminados.`);
       setTimeout(() => msg.delete().catch(() => {}), 4000);
       await sendLog(message.guild, `🗑️ **Clear** | ${deleted.size} mensajes eliminados en <#${message.channel.id}> por ${message.author.tag}`, 0xFF6600);
@@ -1849,6 +1802,75 @@ client.on(Events.MessageCreate, async (message) => {
       await message.reply('🔓 **Canal desbloqueado.** Todos pueden escribir.');
       await sendLog(message.guild, `🔓 **Unlock** | <#${message.channel.id}> desbloqueado por ${message.author.tag}`, 0x00FF00);
     } catch(e) { message.reply('❌ Error: ' + e.message); }
+    return;
+  }
+
+  // ══════════════════════════════════════════════════════
+  //  MOD: !privado — Hacer un canal privado solo para admins/staff
+  // ══════════════════════════════════════════════════════
+  if (command === 'privado' || command === 'private' || command === 'staffonly') {
+    if (!isBotOwner(message.author) && !message.member.permissions.has(PermissionsBitField.Flags.ManageChannels))
+      return message.reply('❌ Solo los administradores pueden cambiar la privacidad de canales.');
+
+    const targetCh = message.mentions.channels.first() || message.channel;
+    const sub = args[0] ? args[0].toLowerCase() : 'on';
+    // Si el primer arg es un canal mencionado, el sub es el segundo arg
+    const subCmd = message.mentions.channels.first() ? (args[1] ? args[1].toLowerCase() : 'on') : sub;
+
+    try {
+      if (subCmd === 'off' || subCmd === 'publico' || subCmd === 'public') {
+        // Restaurar acceso público
+        await targetCh.permissionOverwrites.edit(message.guild.roles.everyone, {
+          ViewChannel: null,
+          SendMessages: null,
+        });
+        await message.reply(`🔓 <#${targetCh.id}> ahora es **público** — todos los miembros pueden verlo.`);
+        await sendLog(message.guild, `🔓 **Canal público** | <#${targetCh.id}> restaurado por ${message.author.tag}`, 0x00FF00);
+      } else {
+        // Hacer privado: ocultar a @everyone, permitir a admins y staff
+        // 1. Ocultar a @everyone
+        await targetCh.permissionOverwrites.edit(message.guild.roles.everyone, {
+          ViewChannel: false,
+          SendMessages: false,
+        });
+        // 2. Dar acceso a roles con permisos de administrador
+        const adminRoles = message.guild.roles.cache.filter(r =>
+          r.permissions.has(PermissionsBitField.Flags.Administrator) ||
+          r.permissions.has(PermissionsBitField.Flags.ManageGuild) ||
+          r.permissions.has(PermissionsBitField.Flags.ManageChannels)
+        );
+        for (const [, role] of adminRoles) {
+          await targetCh.permissionOverwrites.edit(role, {
+            ViewChannel: true,
+            SendMessages: true,
+            ReadMessageHistory: true,
+          }).catch(() => {});
+        }
+        // 3. Dar acceso al bot mismo
+        await targetCh.permissionOverwrites.edit(message.guild.members.me, {
+          ViewChannel: true,
+          SendMessages: true,
+          ReadMessageHistory: true,
+        }).catch(() => {});
+
+        const rolesLista = adminRoles.map(r => `<@&${r.id}>`).join(' ') || 'Administradores';
+        const embed = new EmbedBuilder()
+          .setTitle(`🔒 Canal Privado — Solo Staff`)
+          .setDescription(`Este canal es **privado** y solo visible para el staff del servidor.\n\nLos miembros normales no pueden ver ni acceder a este canal.`)
+          .addFields(
+            { name: '👥 Roles con acceso', value: rolesLista, inline: false },
+            { name: '💡 Tip', value: 'Usa `!privado #canal off` para hacerlo público de nuevo.', inline: false },
+          )
+          .setColor(0xFF0000)
+          .setFooter({ text: `DS6 Bot v3.0 • ds6music.com • Configurado por ${message.author.username}` })
+          .setTimestamp();
+        await targetCh.send({ embeds: [embed] }).catch(() => {});
+        await message.reply(`🔒 <#${targetCh.id}> ahora es **privado** — solo el staff puede verlo.`);
+        await sendLog(message.guild, `🔒 **Canal privado** | <#${targetCh.id}> configurado como privado por ${message.author.tag}`, 0xFF0000);
+      }
+    } catch(e) {
+      return message.reply(`❌ No se pudo cambiar la privacidad del canal. Asegúrate de que el bot tenga el permiso **Gestionar canales**.\nError: ${e.message}`);
+    }
     return;
   }
 
@@ -2051,7 +2073,7 @@ client.on(Events.MessageCreate, async (message) => {
   //  CONFIG: !bienvenida
   // ══════════════════════════════════════════════════════
   if (command === 'bienvenida' || command === 'welcome') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild) && !isStaff(message.member))
+    if (!isBotOwner(message.author) && !message.member.permissions.has(PermissionsBitField.Flags.ManageGuild) && !isStaff(message.member))
       return message.reply('❌ Solo los administradores pueden configurar la bienvenida.');
 
     const welcomeCfg = loadWelcome(guildId);
@@ -2127,31 +2149,204 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   // ══════════════════════════════════════════════════════
+  //  COMANDO: !editar — Personalización de mensajes del servidor
+  // ══════════════════════════════════════════════════════
+  if (command === 'editar' || command === 'edit' || command === 'personalizar') {
+    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild) && !isStaff(message.member))
+      return message.reply('❌ Solo los administradores pueden personalizar los mensajes del servidor.');
+
+    const cfg = loadConfig(guildId);
+    if (!cfg.mensajes) cfg.mensajes = {};
+
+    const sub = args[0] ? args[0].toLowerCase() : null;
+    // Preservar saltos de línea y espacios: leer directamente de message.content
+    // Formato: !editar [sub] [texto con saltos de línea]
+    const rawContent = message.content.trim();
+    const prefixAndCmd = rawContent.match(/^!(?:editar|edit|personalizar)\s*/i)?.[0] || '';
+    const afterCmd = rawContent.slice(prefixAndCmd.length);
+    const subMatch = afterCmd.match(/^(\S+)\s*/i);
+    const subStr = subMatch ? subMatch[0] : '';
+    const texto = sub ? afterCmd.slice(subStr.length) : '';
+
+    const TIPOS_VALIDOS = {
+      bienvenida: { emoji: '🎉', desc: 'Mensaje de bienvenida en canal', vars: '{user} {username} {server} {count} {fecha}', default: '¡Bienvenido/a {user} a **{server}**! 🎉 Eres el miembro #**{count}**.' },
+      despedida:  { emoji: '👋', desc: 'Mensaje cuando alguien sale del servidor', vars: '{username} {server} {count} {fecha}', default: '**{username}** ha abandonado **{server}**. Ahora somos **{count}** miembros.' },
+      reglas:     { emoji: '📜', desc: 'Reglas del servidor (se envía al canal de reglas)', vars: '{server} {fecha}', default: '**Reglas de {server}**\n\n1. Respeta a todos los miembros.\n2. No spam ni flood.\n3. Sigue las normas de Discord.\n4. Diviértete y sé positivo.' },
+      anuncio:    { emoji: '📢', desc: 'Plantilla de anuncios (se usa con !anunciar)', vars: '{server} {fecha} {autor}', default: '📢 **Anuncio de {server}**\n\n{texto}' },
+      dm:         { emoji: '📨', desc: 'Mensaje de DM al entrar al servidor', vars: '{username} {server} {fecha}', default: '¡Hola **{username}**! 👋 Bienvenido/a a **{server}**. Usa `!ayuda` para ver los comandos.' },
+      nivel:      { emoji: '⬆️', desc: 'Mensaje de subida de nivel', vars: '{user} {username} {nivel} {server}', default: '🎉 <@{userId}> ha alcanzado el **Nivel {nivel}** en **{server}**! 🚀' },
+    };
+
+    // !editar ver [tipo] — ver todos o uno específico
+    if (!sub || sub === 'ver' || sub === 'info' || sub === 'lista') {
+      const tipo = texto ? texto.toLowerCase() : null;
+      if (tipo && TIPOS_VALIDOS[tipo]) {
+        const t = TIPOS_VALIDOS[tipo];
+        const actual = cfg.mensajes[tipo] || t.default;
+        const embed = new EmbedBuilder()
+          .setTitle(`${t.emoji} Mensaje de ${tipo.charAt(0).toUpperCase() + tipo.slice(1)}`)
+          .addFields(
+            { name: '📝 Mensaje actual', value: `\`\`\`${actual.substring(0, 900)}\`\`\``, inline: false },
+            { name: '🔧 Variables disponibles', value: `\`${t.vars}\``, inline: false },
+            { name: '📋 Descripción', value: t.desc, inline: false },
+            { name: '🔄 Por defecto', value: `\`\`\`${t.default.substring(0, 500)}\`\`\``, inline: false },
+          )
+          .setColor(0x5865F2)
+          .setFooter({ text: `DS6 Bot v3.0 • Usa !editar ${tipo} [texto] para cambiar` });
+        return message.channel.send({ embeds: [embed] });
+      }
+      // Mostrar todos
+      const embed = new EmbedBuilder()
+        .setTitle(`✏️ Mensajes personalizables — ${message.guild.name}`)
+        .setDescription('Usa `!editar [tipo] [texto]` para personalizar cada mensaje.\nUsa `!editar ver [tipo]` para ver el mensaje actual de un tipo específico.')
+        .addFields(
+          ...Object.entries(TIPOS_VALIDOS).map(([k, v]) => ({
+            name: `${v.emoji} ${k.charAt(0).toUpperCase() + k.slice(1)}`,
+            value: `${v.desc}\n**Actual:** \`${(cfg.mensajes[k] || '(por defecto)').substring(0, 60)}...\`\n**Vars:** \`${v.vars}\``,
+            inline: false
+          }))
+        )
+        .setColor(0x5865F2)
+        .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com • !editar reset [tipo] para restaurar' })
+        .setTimestamp();
+      return message.channel.send({ embeds: [embed] });
+    }
+
+    // !editar reset [tipo] — restaurar al valor por defecto
+    if (sub === 'reset' || sub === 'restaurar' || sub === 'default') {
+      const tipo = texto ? texto.toLowerCase() : null;
+      if (!tipo || !TIPOS_VALIDOS[tipo])
+        return message.reply(`❌ Especifica qué tipo restaurar: \`!editar reset [tipo]\`\nTipos: \`${Object.keys(TIPOS_VALIDOS).join('\` \`')}\``);
+      delete cfg.mensajes[tipo];
+      saveConfig(guildId, cfg);
+      return message.reply(`✅ Mensaje de **${tipo}** restaurado al valor por defecto.`);
+    }
+
+    // !editar [tipo] [texto] — guardar mensaje personalizado
+    if (!TIPOS_VALIDOS[sub])
+      return message.reply(`❌ Tipo no válido. Tipos disponibles: \`${Object.keys(TIPOS_VALIDOS).join('\` \`')}\`\n\nUso: \`!editar [tipo] [texto]\`\nEjemplo: \`!editar bienvenida ¡Hola {user}! Bienvenido a {server} 🎉\``);
+
+    if (!texto)
+      return message.reply(`❌ Debes escribir el texto del mensaje.\n\nUso: \`!editar ${sub} [texto]\`\nVariables: \`${TIPOS_VALIDOS[sub].vars}\``);
+
+    cfg.mensajes[sub] = texto;
+    saveConfig(guildId, cfg);
+
+    // Preview del mensaje con variables reemplazadas
+    const preview = texto
+      .replace(/{user}/g, `<@${message.author.id}>`)
+      .replace(/{username}/g, message.author.username)
+      .replace(/{server}/g, message.guild.name)
+      .replace(/{count}/g, message.guild.memberCount)
+      .replace(/{fecha}/g, new Date().toLocaleDateString('es-ES'))
+      .replace(/{autor}/g, message.author.username)
+      .replace(/{nivel}/g, '5')
+      .replace(/{userId}/g, message.author.id);
+
+    const embed = new EmbedBuilder()
+      .setTitle(`✅ Mensaje de ${sub} actualizado`)
+      .addFields(
+        { name: '📝 Guardado', value: `\`\`\`${texto.substring(0, 900)}\`\`\``, inline: false },
+        { name: '👁️ Vista previa (con tus datos)', value: preview.substring(0, 1000), inline: false },
+      )
+      .setColor(0x00E676)
+      .setFooter({ text: `DS6 Bot v3.0 • Usa !editar ver ${sub} para ver más detalles` });
+    return message.channel.send({ embeds: [embed] });
+  }
+
+  // ══════════════════════════════════════════════════════
+  //  COMANDO: !link — Generar link permanente del servidor
+  // ══════════════════════════════════════════════════════
+  if (command === 'link' || command === 'invite' || command === 'enlace') {
+    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild) && !isStaff(message.member))
+      return message.reply('❌ Solo los administradores pueden generar el link del servidor.');
+
+    try {
+      // Buscar canal de texto adecuado para crear el invite
+      const cfg = loadConfig(guildId);
+      const targetChId = cfg.channels?.general || cfg.channels?.chatES || cfg.channels?.bienvenidos;
+      const targetCh = targetChId
+        ? message.guild.channels.cache.get(targetChId)
+        : message.guild.channels.cache.find(c => c.type === 0 && c.permissionsFor(message.guild.members.me).has('CreateInstantInvite'));
+
+      if (!targetCh)
+        return message.reply('❌ No se encontró un canal de texto para generar el link. Asegúrate de que el bot tenga permisos.');
+
+      // Crear invite permanente (maxAge: 0 = nunca expira, maxUses: 0 = usos ilimitados)
+      const invite = await targetCh.createInvite({
+        maxAge: 0,
+        maxUses: 0,
+        unique: false,
+        reason: `Link permanente generado por ${message.author.tag}`
+      });
+
+      const embed = new EmbedBuilder()
+        .setTitle(`🔗 Link permanente de ${message.guild.name}`)
+        .setDescription(`**https://discord.gg/${invite.code}**\n\n✅ Este link **nunca expira** y tiene **usos ilimitados**.\nCompartelo con quien quieras para que se unan al servidor.`)
+        .addFields(
+          { name: '📌 Canal', value: `<#${targetCh.id}>`, inline: true },
+          { name: '⏳ Expira', value: 'Nunca', inline: true },
+          { name: '👥 Usos máximos', value: 'Ilimitados', inline: true },
+        )
+        .setThumbnail(message.guild.iconURL({ dynamic: true }) || null)
+        .setColor(0x5865F2)
+        .setFooter({ text: `DS6 Bot v3.0 • ds6music.com • Generado por ${message.author.username}` })
+        .setTimestamp();
+      return message.channel.send({ embeds: [embed] });
+    } catch(e) {
+      return message.reply(`❌ No se pudo generar el link. Asegúrate de que el bot tenga el permiso **Crear invitaciones** en el servidor.\nError: ${e.message}`);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════
   //  CONFIG: !autoroles
   // ══════════════════════════════════════════════════════
   if (command === 'autoroles' || command === 'autorole') {
     if (!message.member.permissions.has(PermissionsBitField.Flags.ManageRoles) && !isStaff(message.member))
       return message.reply('❌ Solo los administradores pueden configurar auto-roles.');
-
     const arCfg = loadAutoRoles(guildId);
     const sub = args[0] ? args[0].toLowerCase() : 'ver';
-
     if (sub === 'ver' || sub === 'list') {
-      if (arCfg.roles.length === 0) return message.reply('🏷️ No hay auto-roles configurados. Usa `!autoroles add @rol` para agregar uno.');
+      if (arCfg.roles.length === 0) return message.reply('🏷️ No hay auto-roles configurados.\n\nUsa `!autoroles add NombreDelRol` para crear y agregar un rol automáticamente.');
       const list = arCfg.roles.map(id => `<@&${id}>`).join(' ');
       return message.reply(`🏷️ **Auto-roles actuales:** ${list}\n\nEstos roles se asignan automáticamente cuando alguien entra al servidor.`);
     }
     if (sub === 'add' || sub === 'agregar') {
-      const role = message.mentions.roles.first();
-      if (!role) return message.reply('❌ Uso: `!autoroles add @rol`');
-      if (arCfg.roles.includes(role.id)) return message.reply('❌ Ese rol ya está en la lista de auto-roles.');
+      // Primero intentar con mención de rol
+      let role = message.mentions.roles.first();
+      // Si no hay mención, buscar por nombre o crear el rol
+      if (!role) {
+        const roleName = args.slice(1).join(' ').trim();
+        if (!roleName) return message.reply('❌ Uso: `!autoroles add NombreDelRol`\nEjemplo: `!autoroles add Miembro`');
+        // Buscar rol existente por nombre (insensible a mayúsculas)
+        role = message.guild.roles.cache.find(r => r.name.toLowerCase() === roleName.toLowerCase());
+        if (!role) {
+          // Crear el rol si no existe
+          try {
+            role = await message.guild.roles.create({
+              name: roleName,
+              colors: { primaryColor: 0x5865F2 },
+              reason: `Auto-rol creado por ${message.author.tag} con !autoroles add`
+            });
+            await message.reply(`✨ Rol **${role.name}** creado automáticamente y agregado a los auto-roles.`);
+          } catch(e) {
+            return message.reply(`❌ No pude crear el rol. Asegúrate de que el bot tiene permiso de **Gestionar Roles**.\nError: ${e.message}`);
+          }
+        }
+      }
+      if (arCfg.roles.includes(role.id)) return message.reply(`❌ El rol **${role.name}** ya está en la lista de auto-roles.`);
       arCfg.roles.push(role.id);
       saveAutoRoles(guildId, arCfg);
-      return message.reply(`✅ Rol **${role.name}** agregado a los auto-roles.`);
+      return message.reply(`✅ Rol **${role.name}** agregado a los auto-roles. Los nuevos miembros recibirán este rol automáticamente.`);
     }
     if (sub === 'del' || sub === 'remove' || sub === 'quitar') {
-      const role = message.mentions.roles.first();
-      if (!role) return message.reply('❌ Uso: `!autoroles del @rol`');
+      let role = message.mentions.roles.first();
+      if (!role) {
+        const roleName = args.slice(1).join(' ').trim();
+        if (!roleName) return message.reply('❌ Uso: `!autoroles del NombreDelRol`');
+        role = message.guild.roles.cache.find(r => r.name.toLowerCase() === roleName.toLowerCase());
+        if (!role) return message.reply(`❌ No encontré un rol con ese nombre.`);
+      }
       arCfg.roles = arCfg.roles.filter(id => id !== role.id);
       saveAutoRoles(guildId, arCfg);
       return message.reply(`✅ Rol **${role.name}** eliminado de los auto-roles.`);
@@ -2160,16 +2355,31 @@ client.on(Events.MessageCreate, async (message) => {
       arCfg.roles = []; saveAutoRoles(guildId, arCfg);
       return message.reply('✅ Todos los auto-roles han sido eliminados.');
     }
-    return message.reply('❌ Subcomandos: `ver`, `add @rol`, `del @rol`, `clear`');
+    if (sub === 'color' || sub === 'colour') {
+      const roleName = args[1] ? args.slice(1, -1).join(' ').trim() : null;
+      const colorInput = args[args.length - 1];
+      if (!roleName || !colorInput) return message.reply('❌ Uso: `!autoroles color NombreDelRol #HEX`\nEjemplo: `!autoroles color Coco #FF0000`\n\nColores rápidos: `rojo` `azul` `verde` `amarillo` `morado` `naranja` `rosa` `blanco` `negro` `cyan`');
+      const colorMap = { rojo: '#FF0000', azul: '#0099FF', verde: '#00FF00', amarillo: '#FFFF00', morado: '#9B59B6', naranja: '#FF6600', rosa: '#FF69B4', blanco: '#FFFFFF', negro: '#000000', cyan: '#00FFFF', gris: '#808080', dorado: '#FFD700', plateado: '#C0C0C0' };
+      const hexColor = colorMap[colorInput.toLowerCase()] || colorInput;
+      if (!/^#[0-9A-Fa-f]{6}$/.test(hexColor)) return message.reply('❌ Color inválido. Usa un código HEX como `#FF0000` o un nombre: `rojo`, `azul`, `verde`, `amarillo`, `morado`, `naranja`, `rosa`, `blanco`, `negro`, `cyan`, `dorado`');
+      const role = message.guild.roles.cache.find(r => r.name.toLowerCase() === roleName.toLowerCase());
+      if (!role) return message.reply(`❌ No encontré el rol **${roleName}**. Usa \`!autoroles ver\` para ver los roles configurados.`);
+      try {
+        await role.setColors({ primaryColor: hexColor });
+        return message.reply(`✅ Color del rol **${role.name}** cambiado a **${hexColor}**.`);
+      } catch(e) {
+        return message.reply(`❌ No pude cambiar el color. Asegúrate de que el bot tiene permiso de **Gestionar Roles** y que el rol esté por debajo del bot.`);
+      }
+    }
+    return message.reply('🏷️ **Uso de !autoroles:**\n`!autoroles ver` — Ver auto-roles actuales\n`!autoroles add NombreDelRol` — Agregar (crea el rol si no existe)\n`!autoroles del NombreDelRol` — Eliminar de la lista\n`!autoroles color NombreDelRol #HEX` — Cambiar color del rol\n`!autoroles clear` — Eliminar todos');
   }
 
   // ══════════════════════════════════════════════════════
   //  CONFIG: !antispam
   // ══════════════════════════════════════════════════════
   if (command === 'antispam') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild))
+    if (!isBotOwner(message.author) && !message.member.permissions.has(PermissionsBitField.Flags.ManageGuild))
       return message.reply('❌ Solo los administradores pueden configurar el anti-spam.');
-
     const cfg = loadConfig(guildId);
     if (!cfg.antispam) cfg.antispam = { enabled: false, limit: 5, window: 5, muteDuration: '5m' };
     const sub = args[0] ? args[0].toLowerCase() : 'ver';
@@ -2212,7 +2422,7 @@ client.on(Events.MessageCreate, async (message) => {
   //  CONFIG: !config (panel principal)
   // ══════════════════════════════════════════════════════
   if (command === 'config' || command === 'configuracion') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild))
+    if (!isBotOwner(message.author) && !message.member.permissions.has(PermissionsBitField.Flags.ManageGuild))
       return message.reply('❌ Solo los administradores pueden ver la configuración.');
 
     const cfg = loadConfig(guildId);
@@ -2244,7 +2454,7 @@ client.on(Events.MessageCreate, async (message) => {
         { name: '🎉 Sorteo', value: `Meta: **${cfg.sorteoMeta || 150}** miembros\nActivo: **${cfg.sorteoActive ? 'Sí' : 'No'}**`, inline: true },
       )
       .setColor(0x5865F2)
-      .setFooter({ text: 'DS6 Bot v3.0 • Usa !ayuda para ver todos los comandos' })
+      .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com • Usa !ayuda para ver todos los comandos' })
       .setTimestamp();
     return message.channel.send({ embeds: [embed] });
   }
@@ -2253,7 +2463,7 @@ client.on(Events.MessageCreate, async (message) => {
   //  COMANDO: !addcoins (solo Owner/Admin)
   // ══════════════════════════════════════════════════════
   if (command === 'addcoins') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
+    if (!isBotOwner(message.author) && !message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
     const target = message.mentions.members.first();
     const amount = parseInt(args[1]);
     if (!target || isNaN(amount)) return message.reply('❌ Uso: `!addcoins @usuario cantidad`');
@@ -2265,7 +2475,7 @@ client.on(Events.MessageCreate, async (message) => {
   //  COMANDO: !addxp (solo Owner/Admin)
   // ══════════════════════════════════════════════════════
   if (command === 'addxp') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
+    if (!isBotOwner(message.author) && !message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
     const target = message.mentions.members.first();
     const amount = parseInt(args[1]);
     if (!target || isNaN(amount)) return message.reply('❌ Uso: `!addxp @usuario cantidad`');
@@ -2312,8 +2522,8 @@ client.on(Events.MessageCreate, async (message) => {
         { name: '🎮 Diversión', value: '`!8ball` `!dado` `!moneda` `!chiste`\n`!abrazo` `!beso` `!slap` `!meme`\n`!rps` `!trivia` `!verdadoreto`\n`!bailar` `!llorar` `!comer` `!dormir`', inline: true },
         { name: '💰 Economía', value: '`!coins` `!daily` `!trabajo`\n`!transferir` `!robar` `!topcoins`\n`!invitaciones` `!canjear`', inline: true },
         { name: '📊 Perfil', value: '`!nivel` `!top` `!perfil`\n`!userinfo` `!avatar`\n`!serverinfo` `!botinfo`\n`!ping`', inline: true },
-        { name: '🛡️ Moderación (Staff)', value: '`!kick` `!ban` `!unban`\n`!silenciar` `!desilenciar`\n`!warn` `!warnings` `!clearwarns`\n`!clear` `!lock` `!unlock`\n`!slowmode` `!nick` `!banlist`', inline: true },
-        { name: '⚙️ Config (Admin)', value: '`!setup` `!config` `!bienvenida`\n`!autoroles` `!antispam`\n`!setcanal` `!setrol` `!sorteo`\n`!idioma` `!tag`', inline: true },
+        { name: '🛡️ Moderación (Staff)', value: '`!kick` `!ban` `!unban`\n`!silenciar` `!desilenciar`\n`!warn` `!warnings` `!clearwarns`\n`!clear` `!lock` `!unlock`\n`!slowmode` `!nick` `!banlist`\n`!privado`', inline: true },
+        { name: '⚙️ Config (Admin)', value: '`!setup` `!config` `!bienvenida`\n`!autoroles` `!antispam`\n`!setcanal` `!setrol` `!sorteo`\n`!idioma` `!tag`\n`!editar` `!link`', inline: true },
         { name: '🎫 Tickets & Más', value: '`!ticket [consulta]`\n`!cerrar` (en canal ticket)\n`!poll` `!calc` `!recordatorio`\n`!traducir` `!reglas` `!precio`', inline: true },
       )
       .setColor(0x8B0000)
@@ -2522,6 +2732,122 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   // ══════════════════════════════════════════════════════
+  //  UTILIDADES: !traducir
+  // ══════════════════════════════════════════════════════
+  if (command === 'traducir' || command === 'translate' || command === 'tr') {
+    // Idiomas soportados con sus códigos
+    const IDIOMAS = {
+      'es': 'Español', 'en': 'Inglés', 'pt': 'Portugués', 'fr': 'Francés',
+      'de': 'Alemán', 'it': 'Italiano', 'ja': 'Japonés', 'ko': 'Coreano',
+      'zh': 'Chino', 'ru': 'Ruso', 'ar': 'Árabe', 'hi': 'Hindi',
+      'nl': 'Holandés', 'pl': 'Polaco', 'tr': 'Turco', 'sv': 'Sueco',
+      'da': 'Danés', 'fi': 'Finlés', 'no': 'Noruego', 'uk': 'Ucraniano',
+    };
+    const ALIAS = {
+      'espanol': 'es', 'español': 'es', 'spanish': 'es',
+      'ingles': 'en', 'inglés': 'en', 'english': 'en',
+      'portugues': 'pt', 'portugués': 'pt', 'portuguese': 'pt',
+      'frances': 'fr', 'francés': 'fr', 'french': 'fr',
+      'aleman': 'de', 'alemán': 'de', 'german': 'de',
+      'italiano': 'it', 'italian': 'it',
+      'japones': 'ja', 'japonés': 'ja', 'japanese': 'ja',
+      'coreano': 'ko', 'korean': 'ko',
+      'chino': 'zh', 'chinese': 'zh',
+      'ruso': 'ru', 'russian': 'ru',
+      'arabe': 'ar', 'árabe': 'ar', 'arabic': 'ar',
+    };
+
+    // Uso: !traducir [idioma_destino] [texto]
+    // Uso: !traducir [idioma_origen] [idioma_destino] [texto]
+    // Uso: !traducir (sin args) — muestra ayuda
+    if (!args[0]) {
+      const embed = new EmbedBuilder()
+        .setTitle('🌐 Comando !traducir')
+        .setDescription(
+          '**Traduce texto a cualquier idioma de forma instantánea.**\n\n' +
+          '**Uso básico:**\n' +
+          '`!traducir [idioma] [texto]`\n' +
+          'Ejemplo: `!traducir en Hola, ¿cómo estás?`\n\n' +
+          '**Uso avanzado (especificar origen):**\n' +
+          '`!traducir [origen] [destino] [texto]`\n' +
+          'Ejemplo: `!traducir es en Hola mundo`\n\n' +
+          '**Idiomas disponibles:**\n' +
+          Object.entries(IDIOMAS).map(([k, v]) => `\`${k}\` ${v}`).join(' • ')
+        )
+        .setColor(0x5865F2)
+        .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com' });
+      return message.channel.send({ embeds: [embed] });
+    }
+
+    // Detectar si el primer arg es un idioma válido
+    let fromLang = 'auto';
+    let toLang = null;
+    let textToTranslate = '';
+
+    const arg0 = args[0].toLowerCase();
+    const arg1 = args[1] ? args[1].toLowerCase() : null;
+
+    const resolveCode = (s) => ALIAS[s] || (IDIOMAS[s] ? s : null);
+
+    const code0 = resolveCode(arg0);
+    const code1 = arg1 ? resolveCode(arg1) : null;
+
+    if (code0 && code1) {
+      // !traducir es en texto...
+      fromLang = code0;
+      toLang = code1;
+      textToTranslate = args.slice(2).join(' ');
+    } else if (code0) {
+      // !traducir en texto...
+      toLang = code0;
+      textToTranslate = args.slice(1).join(' ');
+    } else {
+      return message.reply(`❌ Idioma no reconocido: \`${arg0}\`\n\nUsa \`!traducir\` para ver los idiomas disponibles.`);
+    }
+
+    if (!textToTranslate.trim())
+      return message.reply(`❌ Debes escribir el texto a traducir.\nEjemplo: \`!traducir ${toLang} Hola mundo\``);
+
+    if (textToTranslate.length > 500)
+      return message.reply('❌ El texto es demasiado largo. Máximo 500 caracteres.');
+
+    // Mostrar indicador de escritura
+    await message.channel.sendTyping().catch(() => {});
+
+    try {
+      // Llamar a la API de MyMemory (gratuita, sin clave)
+      const langPair = `${fromLang}|${toLang}`;
+      const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(textToTranslate)}&langpair=${langPair}`;
+      const res = await fetch(url);
+      const data = await res.json();
+
+      if (!data || data.responseStatus !== 200)
+        return message.reply('❌ No se pudo traducir el texto. Intenta de nuevo.');
+
+      const translated = data.responseData.translatedText;
+      const detectedFrom = fromLang === 'auto'
+        ? (data.responseData.detectedLanguage || 'auto')
+        : fromLang;
+
+      const fromName = IDIOMAS[detectedFrom] || detectedFrom.toUpperCase();
+      const toName = IDIOMAS[toLang] || toLang.toUpperCase();
+
+      const embed = new EmbedBuilder()
+        .setTitle('🌐 Traducción')
+        .addFields(
+          { name: `📝 Original (${fromName})`, value: `\`\`\`${textToTranslate.substring(0, 900)}\`\`\``, inline: false },
+          { name: `✅ Traducción (${toName})`, value: `\`\`\`${translated.substring(0, 900)}\`\`\``, inline: false },
+        )
+        .setColor(0x5865F2)
+        .setFooter({ text: `DS6 Bot v3.0 • ds6music.com • Traducido por ${message.author.username}` })
+        .setTimestamp();
+      return message.channel.send({ embeds: [embed] });
+    } catch(e) {
+      return message.reply('❌ Error al conectar con el servicio de traducción. Intenta de nuevo en unos segundos.');
+    }
+  }
+
+  // ══════════════════════════════════════════════════════
   //  UTILIDADES: !ping
   // ══════════════════════════════════════════════════════
   if (command === 'ping' || command === 'latencia') {
@@ -2560,7 +2886,7 @@ client.on(Events.MessageCreate, async (message) => {
         { name: '📋 Prefijo', value: '**!**', inline: true },
       )
       .setColor(0x8B0000)
-      .setFooter({ text: 'DS6 Bot v3.0 • Hecho con ❤️ por DS6Music' })
+      .setFooter({ text: 'DS6 Bot v3.0' })
       .setTimestamp();
     return message.channel.send({ embeds: [embed] });
   }
@@ -2716,6 +3042,81 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   // ══════════════════════════════════════════════════════
+  //  MODERACIÓN: !rol
+  // ══════════════════════════════════════════════════════
+  if (command === 'rol' || command === 'role' || command === 'darro' || command === 'giverole') {
+    if (!isStaff(message.member)) return message.reply('❌ No tienes permisos para gestionar roles.');
+    const sub = args[0] ? args[0].toLowerCase() : null;
+    if (!sub) return message.reply('🏷️ **Uso de !rol:**\n`!rol add @usuario NombreDelRol` — Dar un rol a un miembro\n`!rol del @usuario NombreDelRol` — Quitar un rol a un miembro\n`!rol ver @usuario` — Ver los roles de un miembro');
+    const target = message.mentions.members.first();
+    if (!target) return message.reply('❌ Debes mencionar a un usuario. Ej: `!rol add @usuario NombreDelRol`');
+    if (sub === 'add' || sub === 'agregar' || sub === 'dar') {
+      const roleName = args.slice(2).join(' ').trim();
+      if (!roleName) return message.reply('❌ Uso: `!rol add @usuario NombreDelRol`\nEjemplo: `!rol add @Juan Miembro`');
+      let role = message.guild.roles.cache.find(r => r.name.toLowerCase() === roleName.toLowerCase());
+      if (!role) {
+        // Crear el rol si no existe
+        try {
+          role = await message.guild.roles.create({
+            name: roleName,
+            colors: { primaryColor: 0x5865F2 },
+            reason: `Rol creado por ${message.author.tag} con !rol add`
+          });
+        } catch(e) {
+          return message.reply(`❌ No pude crear el rol **${roleName}**. Verifica que el bot tiene permiso de **Gestionar Roles**.`);
+        }
+      }
+      if (target.roles.cache.has(role.id)) return message.reply(`❌ **${target.user.username}** ya tiene el rol **${role.name}**.`);
+      try {
+        await target.roles.add(role);
+        const embed = new EmbedBuilder()
+          .setTitle('🏷️ Rol Asignado')
+          .addFields(
+            { name: '👤 Usuario', value: `${target.user.username}`, inline: true },
+            { name: '🏷️ Rol', value: `**${role.name}**`, inline: true },
+            { name: '🛡️ Moderador', value: `${message.author.username}`, inline: true },
+          ).setColor(0x00E676).setTimestamp();
+        return message.channel.send({ embeds: [embed] });
+      } catch(e) {
+        return message.reply(`❌ No pude asignar el rol. Asegúrate de que el rol del bot esté por encima de **${role.name}** en la lista de roles.`);
+      }
+    }
+    if (sub === 'del' || sub === 'remove' || sub === 'quitar') {
+      const roleName = args.slice(2).join(' ').trim();
+      if (!roleName) return message.reply('❌ Uso: `!rol del @usuario NombreDelRol`');
+      const role = message.guild.roles.cache.find(r => r.name.toLowerCase() === roleName.toLowerCase());
+      if (!role) return message.reply(`❌ No encontré el rol **${roleName}** en este servidor.`);
+      if (!target.roles.cache.has(role.id)) return message.reply(`❌ **${target.user.username}** no tiene el rol **${role.name}**.`);
+      try {
+        await target.roles.remove(role);
+        const embed = new EmbedBuilder()
+          .setTitle('🗑️ Rol Removido')
+          .addFields(
+            { name: '👤 Usuario', value: `${target.user.username}`, inline: true },
+            { name: '🏷️ Rol', value: `**${role.name}**`, inline: true },
+            { name: '🛡️ Moderador', value: `${message.author.username}`, inline: true },
+          ).setColor(0xFF6600).setTimestamp();
+        return message.channel.send({ embeds: [embed] });
+      } catch(e) {
+        return message.reply(`❌ No pude quitar el rol. Asegúrate de que el rol del bot esté por encima de **${role.name}** en la lista de roles.`);
+      }
+    }
+    if (sub === 'ver' || sub === 'info' || sub === 'list') {
+      const roles = target.roles.cache
+        .filter(r => r.id !== message.guild.id)
+        .sort((a, b) => b.position - a.position)
+        .map(r => `<@&${r.id}>`)
+        .join(' ');
+      const embed = new EmbedBuilder()
+        .setTitle(`🏷️ Roles de ${target.user.username}`)
+        .setDescription(roles || 'Sin roles asignados')
+        .setThumbnail(target.user.displayAvatarURL({ forceStatic: false }))
+        .setColor(0x5865F2).setTimestamp();
+      return message.channel.send({ embeds: [embed] });
+    }
+    return message.reply('🏷️ **Uso de !rol:**\n`!rol add @usuario NombreDelRol` — Dar un rol\n`!rol del @usuario NombreDelRol` — Quitar un rol\n`!rol ver @usuario` — Ver roles del usuario');
+  }
+  // ══════════════════════════════════════════════════════
   //  MODERACIÓN: !nick
   // ══════════════════════════════════════════════════════
   if (command === 'nick' || command === 'apodo' || command === 'nickname') {
@@ -2737,11 +3138,23 @@ client.on(Events.MessageCreate, async (message) => {
   //  CONFIGURACIÓN: !setcanal
   // ══════════════════════════════════════════════════════
   if (command === 'setcanal' || command === 'setchannel') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild))
+    if (!isBotOwner(message.author) && !message.member.permissions.has(PermissionsBitField.Flags.ManageGuild))
       return message.reply('❌ Solo los administradores pueden configurar canales.');
     const cfg = loadConfig(guildId);
     const tipo = args[0] ? args[0].toLowerCase() : null;
     const canal = message.mentions.channels.first();
+    // Normalizar aliases de tipos
+    const aliasMap = {
+      'bienvenida': 'bienvenidos', 'welcome': 'bienvenidos', 'bienvenido': 'bienvenidos',
+      'log': 'logs', 'staff': 'logs', 'moderacion': 'logs', 'mod': 'logs',
+      'ticket': 'soporte', 'tickets': 'soporte', 'support': 'soporte', 'ayuda': 'soporte',
+      'sorteo': 'sorteos', 'giveaway': 'sorteos',
+      'anuncio': 'anuncios', 'announce': 'anuncios', 'noticias': 'anuncios',
+      'top': 'top3', 'salas': 'top3',
+      'chat': 'chatES', 'chates': 'chatES', 'chaten': 'chatEN',
+      'regla': 'reglas', 'rules': 'reglas', 'normas': 'reglas',
+    };
+    if (aliasMap[tipo]) tipo = aliasMap[tipo];
     const validTypes = ['bienvenidos', 'logs', 'sorteos', 'soporte', 'anuncios', 'top3', 'general', 'chatES', 'chatEN', 'reglas'];
     if (!tipo || !validTypes.includes(tipo))
       return message.reply(`❌ Uso: \`!setcanal [tipo] #canal\`\nTipos válidos: \`${validTypes.join('`, `')}\``);
@@ -2749,14 +3162,88 @@ client.on(Events.MessageCreate, async (message) => {
     if (!cfg.channels) cfg.channels = {};
     cfg.channels[tipo] = canal.id;
     saveConfig(guildId, cfg);
-    return message.reply(`✅ Canal de **${tipo}** configurado a <#${canal.id}>.`);
+
+    // Enviar mensaje apropiado al canal configurado según su tipo
+    const targetChannel = canal;
+    const guildName = message.guild.name;
+
+    if (tipo === 'soporte') {
+      await setupTicketMessage(message.guild).catch(e => console.error('[Tickets]', e.message));
+      return message.reply(`✅ Canal de **soporte** configurado a <#${canal.id}>. El panel de tickets ha sido enviado.`);
+    }
+
+    if (tipo === 'bienvenidos') {
+      const embed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle(`👋 Canal de Bienvenida — ${guildName}`)
+        .setDescription(`Este canal está configurado para recibir a los nuevos miembros del servidor.\n\nCada vez que alguien se una al servidor, el bot enviará aquí un mensaje de bienvenida personalizado.`)
+        .setFooter({ text: `DS6 Bot v3.0 • ds6music.com • Canal de bienvenida activo` });
+      await targetChannel.send({ embeds: [embed] }).catch(() => {});
+    }
+
+    if (tipo === 'logs') {
+      const embed = new EmbedBuilder()
+        .setColor(0xFEE75C)
+        .setTitle(`📋 Canal de Logs — ${guildName}`)
+        .setDescription(`Este canal está configurado para recibir los registros de moderación del servidor.\n\nAquí se registrarán: kicks, bans, mutes, advertencias, mensajes eliminados y cambios de configuración.`)
+        .setFooter({ text: `DS6 Bot v3.0 • ds6music.com • Canal de logs activo` });
+      await targetChannel.send({ embeds: [embed] }).catch(() => {});
+    }
+
+    if (tipo === 'sorteos') {
+      const embed = new EmbedBuilder()
+        .setColor(0xFF73FA)
+        .setTitle(`🎉 Canal de Sorteos — ${guildName}`)
+        .setDescription('Este canal está configurado para los sorteos del servidor.\n\nLos administradores pueden crear sorteos con:\n```\n!sortear [duración] [ganadores] [premio]\n```\nEjemplo: !sortear 1h 1 20,000 Créditos IMVU\n\nLos miembros participan reaccionando con 🎉')
+        .setFooter({ text: `DS6 Bot v3.0 • ds6music.com • Canal de sorteos activo` });
+      await targetChannel.send({ embeds: [embed] }).catch(() => {});
+    }
+
+    if (tipo === 'anuncios') {
+      const embed = new EmbedBuilder()
+        .setColor(0xEB459E)
+        .setTitle(`📢 Canal de Anuncios — ${guildName}`)
+        .setDescription(`Este canal está configurado para los anuncios oficiales del servidor.\n\nSolo el staff puede publicar aquí. Los miembros recibirán notificaciones de los anuncios importantes.`)
+        .setFooter({ text: `DS6 Bot v3.0 • ds6music.com • Canal de anuncios activo` });
+      await targetChannel.send({ embeds: [embed] }).catch(() => {});
+    }
+
+    if (tipo === 'top3') {
+      const embed = new EmbedBuilder()
+        .setColor(0xFFD700)
+        .setTitle(`🏆 Top 3 Salas Más Activas — ${guildName}`)
+        .setDescription(`Este canal mostrará las 3 salas de DS6Music con más oyentes en tiempo real.\n\nSe actualiza automáticamente cada 10 minutos.`)
+        .setFooter({ text: `DS6 Bot v3.0 • ds6music.com • Canal Top 3 activo` });
+      await targetChannel.send({ embeds: [embed] }).catch(() => {});
+    }
+
+    if (tipo === 'reglas') {
+      const embed = new EmbedBuilder()
+        .setColor(0xED4245)
+        .setTitle(`📜 Reglas del Servidor — ${guildName}`)
+        .setDescription('Este canal está configurado para las reglas del servidor.\n\nUsa !reglas para publicar las reglas o escríbelas directamente aquí.\n\nTodos los miembros deben leer y respetar las normas del servidor.')
+        .setFooter({ text: `DS6 Bot v3.0 • ds6music.com • Canal de reglas activo` });
+      await targetChannel.send({ embeds: [embed] }).catch(() => {});
+    }
+
+    if (tipo === 'general' || tipo === 'chatES' || tipo === 'chatEN') {
+      const lang = tipo === 'chatEN' ? 'English' : 'Español';
+      const embed = new EmbedBuilder()
+        .setColor(0x57F287)
+        .setTitle(`💬 Canal de Chat — ${guildName}`)
+        .setDescription(`Este canal está configurado como canal de chat principal (${lang}).\n\nLos miembros pueden usar aquí todos los comandos del bot con el prefijo !`)
+        .setFooter({ text: `DS6 Bot v3.0 • ds6music.com • Canal de chat activo` });
+      await targetChannel.send({ embeds: [embed] }).catch(() => {});
+    }
+
+    return message.reply(`✅ Canal de **${tipo}** configurado a <#${canal.id}>. Se ha enviado un mensaje de activación al canal.`);
   }
 
   // ══════════════════════════════════════════════════════
   //  CONFIGURACIÓN: !setrol / !levelroles
   // ══════════════════════════════════════════════════════
   if (command === 'setrol' || command === 'setrole' || command === 'levelroles') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.ManageRoles))
+    if (!isBotOwner(message.author) && !message.member.permissions.has(PermissionsBitField.Flags.ManageRoles))
       return message.reply('❌ Solo los administradores pueden configurar roles de nivel.');
     const cfg = loadConfig(guildId);
     const nivel = args[0];
@@ -2773,205 +3260,586 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   // ══════════════════════════════════════════════════════
-  //  CONFIGURACIÓN: !sorteo (admin)
+  //  SORTEOS: !sortear (admin)
   // ══════════════════════════════════════════════════════
-  if (command === 'sorteo' || command === 'giveaway') {
-    if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator))
-      return message.reply('❌ Solo los administradores pueden gestionar sorteos.');
-    const sub = args[0] ? args[0].toLowerCase() : 'info';
-    if (sub === 'info' || sub === 'ver') {
-      const cfg = loadConfig(guildId);
-      await message.guild.members.fetch().catch(() => {});
-      const memberCount = message.guild.members.cache.filter(m => !m.user.bot).size;
-      const embed = new EmbedBuilder().setTitle('🎉 Estado del Sorteo')
-        .addFields(
-          { name: '📊 Miembros actuales', value: `**${memberCount}**`, inline: true },
-          { name: '🎯 Meta', value: `**${cfg.sorteoMeta || 150}**`, inline: true },
-          { name: '✅ Activo', value: cfg.sorteoActive ? 'Sí' : 'No', inline: true },
-        ).setColor(0xF1C40F);
-      return message.channel.send({ embeds: [embed] });
+  if (command === 'sortear' || command === 'sorteo' || command === 'giveaway') {
+    if (!isBotOwner(message.author) && !message.member.permissions.has(PermissionsBitField.Flags.Administrator))
+      return message.reply('❌ Solo los administradores pueden crear sorteos.');
+    // Formato: !sortear [duración] [ganadores] [premio...]
+    // Ejemplo: !sortear 1h 1 20000 créditos IMVU
+    // Ejemplo: !sortear 30m 3 Mes gratis de DS6Music
+    const sub = args[0] ? args[0].toLowerCase() : '';
+    // Cancelar sorteo activo
+    if (sub === 'cancelar' || sub === 'cancel' || sub === 'stop') {
+      if (!activeSorteos.has(guildId)) return message.reply('❌ No hay ningún sorteo activo en este servidor.');
+      const s = activeSorteos.get(guildId);
+      clearTimeout(s.timer);
+      activeSorteos.delete(guildId);
+      return message.reply('🚫 Sorteo cancelado.');
     }
-    if (sub === 'meta' || sub === 'setmeta') {
-      const n = parseInt(args[1]);
-      if (!n || n < 10) return message.reply('❌ Uso: `!sorteo meta [número]` (mínimo 10)');
-      const cfg = loadConfig(guildId);
-      cfg.sorteoMeta = n;
-      saveConfig(guildId, cfg);
-      await updateSorteoPanel(message.guild).catch(() => {});
-      return message.reply(`✅ Meta del sorteo actualizada a **${n} miembros**.`);
+    // Ver sorteo activo
+    if (sub === 'ver' || sub === 'info' || sub === 'status') {
+      if (!activeSorteos.has(guildId)) return message.reply('ℹ️ No hay ningún sorteo activo en este servidor.');
+      const s = activeSorteos.get(guildId);
+      const remaining = Math.max(0, s.endsAt - Date.now());
+      const mins = Math.floor(remaining / 60000);
+      const secs = Math.floor((remaining % 60000) / 1000);
+      return message.reply(`🎉 **Sorteo activo:** ${s.premio}\n👥 Participantes: ${s.participants.size}\n🏆 Ganadores: ${s.ganadores}\n⏰ Termina en: ${mins}m ${secs}s`);
     }
-    if (sub === 'iniciar' || sub === 'start') {
-      await message.reply('🎰 **Iniciando sorteo manual...**');
-      await ejecutarSorteo(message.guild, message.channel);
-      return;
+    // Crear nuevo sorteo: !sortear [duración] [nGanadores] [premio...]
+    if (activeSorteos.has(guildId)) return message.reply('❌ Ya hay un sorteo activo. Usa `!sortear cancelar` para cancelarlo primero.');
+    const durStr = args[0];
+    const nGanadores = parseInt(args[1]);
+    const premio = args.slice(2).join(' ');
+    if (!durStr || !nGanadores || !premio) {
+      return message.reply(
+        '❌ **Uso:** `!sortear [duración] [nGanadores] [premio]`\n\n' +
+        '**Ejemplos:**\n' +
+        '• `!sortear 1h 1 20,000 Créditos IMVU`\n' +
+        '• `!sortear 30m 3 Premio especial`\n' +
+        '• `!sortear 2h 1 Suscripción Premium`\n\n' +
+        '**Duraciones:** `10m`, `30m`, `1h`, `2h`, `12h`, `1d`'
+      );
     }
-    if (sub === 'panel' || sub === 'update') {
-      await updateSorteoPanel(message.guild);
-      return message.reply('✅ Panel de sorteo actualizado.');
-    }
-    return message.reply('❌ Subcomandos: `info`, `meta [N]`, `iniciar`, `panel`');
+    const durMs = parseDuration(durStr);
+    if (!durMs || durMs < 10000 || durMs > 86400000 * 7) return message.reply('❌ Duración inválida. Mínimo 10 segundos, máximo 7 días.');
+    if (nGanadores < 1 || nGanadores > 20) return message.reply('❌ Número de ganadores debe ser entre 1 y 20.');
+    const endsAt = Date.now() + durMs;
+    const durText = formatDuration(durMs);
+    const embed = new EmbedBuilder()
+      .setTitle('🎉 ¡SORTEO INICIADO!')
+      .setDescription(
+        `**🎁 Premio:** ${premio}\n` +
+        `**🏆 Ganadores:** ${nGanadores}\n` +
+        `**⏰ Duración:** ${durText}\n` +
+        `**📅 Termina:** <t:${Math.floor(endsAt / 1000)}:R>\n\n` +
+        `Reacciona con 🎉 para participar!`
+      )
+      .setColor(0xFFD700)
+      .setFooter({ text: `Sorteo creado por ${message.author.tag} • DS6 Bot` })
+      .setTimestamp();
+    const sorteoMsg = await message.channel.send({ embeds: [embed] });
+    await sorteoMsg.react('🎉');
+    const sorteoData = {
+      premio, ganadores: nGanadores, durMs, endsAt,
+      channelId: message.channel.id, messageId: sorteoMsg.id,
+      participants: new Set(),
+      timer: setTimeout(async () => {
+        try {
+          // Recoger participantes de la reacción
+          const ch = message.guild.channels.cache.get(sorteoData.channelId);
+          if (!ch) return;
+          const msg = await ch.messages.fetch(sorteoData.messageId).catch(() => null);
+          const reaction = msg ? msg.reactions.cache.get('🎉') : null;
+          let users = reaction ? await reaction.users.fetch() : new Map();
+          const eligible = [...users.values()].filter(u => !u.bot);
+          activeSorteos.delete(guildId);
+          if (eligible.length === 0) {
+            return ch.send('😔 El sorteo terminó pero **nadie participó**. ¡Mejor suerte la próxima vez!');
+          }
+          // Elegir ganadores únicos al azar
+          const shuffled = eligible.sort(() => Math.random() - 0.5);
+          const winners = shuffled.slice(0, Math.min(nGanadores, shuffled.length));
+          const mentions = winners.map(u => `<@${u.id}>`).join(', ');
+          const resultEmbed = new EmbedBuilder()
+            .setTitle('🏆 ¡SORTEO FINALIZADO — RESULTADOS!')
+            .setDescription(
+              `**🎁 Premio:** ${premio}\n\n` +
+              `**🎉 Ganador${winners.length > 1 ? 'es' : ''}:**\n${mentions}\n\n` +
+              `**👥 Participantes totales:** ${eligible.length}\n` +
+              `> Contacten al Staff para reclamar su premio.`
+            )
+            .setColor(0x00E676)
+            .setFooter({ text: 'DS6 Bot • Sorteo oficial' })
+            .setTimestamp();
+          await ch.send({ content: `🎊 ¡Felicitaciones ${mentions}!`, embeds: [resultEmbed] });
+        } catch(e) { console.error('[Sorteo] Error al finalizar:', e.message); }
+      }, durMs)
+    };
+    activeSorteos.set(guildId, sorteoData);
+    return;
   }
 
   } catch(e) { console.error('[CMD Error]', e.message); }
 });
-
 // ══════════════════════════════════════════════════════
-//  BOTONES (Tickets)
+//  INTERACCIONES (Botones, Slash Commands, Context Menus)
 // ══════════════════════════════════════════════════════
 client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isButton()) return;
 
-  // Botón de comandos en el mensaje de bienvenida del servidor
-  if (interaction.customId === 'welcome_comandos') {
-    const embed = new EmbedBuilder()
-      .setTitle('📋 Comandos de DS6 Bot v3.0')
-      .setColor(0x8B0000)
-      .addFields(
-        { name: '⚙️ Configuración', value: '`!setup` `!config` `!bienvenida` `!autoroles` `!antispam`', inline: false },
-        { name: '🛡️ Moderación', value: '`!kick` `!ban` `!unban` `!silenciar` `!warn` `!clear` `!lock`', inline: false },
-        { name: '💰 Economía', value: '`!coins` `!daily` `!trabajo` `!robar` `!transferir` `!topcoins`', inline: false },
-        { name: '⭐ Niveles', value: '`!nivel` `!top` `!perfil` `!xp`', inline: false },
-        { name: '🎮 Diversión', value: '`!8ball` `!trivia` `!rps` `!dado` `!moneda` `!chiste` `!meme`', inline: false },
-        { name: '🎫 Soporte', value: '`!ticket` `!cerrar` `!tag`', inline: false },
-        { name: '🔧 Utilidades', value: '`!userinfo` `!serverinfo` `!avatar` `!ping` `!botinfo` `!poll`', inline: false },
-      )
-      .setFooter({ text: 'DS6 Bot v3.0 • Usa !ayuda para más detalles • ds6music.com' });
-    return interaction.reply({ embeds: [embed], flags: ['Ephemeral'] }).catch(() => {});
+  // ── BOTONES ──
+  if (interaction.isButton()) {
+    // Botón de comandos en el mensaje de bienvenida del servidor
+    if (interaction.customId === 'welcome_comandos') {
+      const embed = new EmbedBuilder()
+        .setTitle('📋 Comandos de DS6 Bot v3.0')
+        .setColor(0x8B0000)
+        .addFields(
+          { name: '⚙️ Configuración', value: '`!setup` `!config` `!bienvenida` `!autoroles` `!antispam`', inline: false },
+          { name: '🛡️ Moderación', value: '`!kick` `!ban` `!unban` `!silenciar` `!warn` `!clear` `!lock`', inline: false },
+          { name: '💰 Economía', value: '`!coins` `!daily` `!trabajo` `!robar` `!transferir` `!topcoins`', inline: false },
+          { name: '⭐ Niveles', value: '`!nivel` `!top` `!perfil` `!xp`', inline: false },
+          { name: '🎮 Diversión', value: '`!8ball` `!trivia` `!rps` `!dado` `!moneda` `!chiste` `!meme`', inline: false },
+          { name: '🎫 Soporte', value: '`!ticket` `!cerrar` `!tag`', inline: false },
+          { name: '🔧 Utilidades', value: '`!userinfo` `!serverinfo` `!avatar` `!ping` `!botinfo` `!poll`', inline: false },
+        )
+        .setFooter({ text: 'DS6 Bot v3.0 • Usa !ayuda para más detalles • ds6music.com' });
+      return await interaction.reply({ embeds: [embed], flags: ['Ephemeral'] }).catch(() => {});
+    }
+
+    if (!interaction.guild) return;
+    const guildId = interaction.guild.id;
+    const cfg = loadConfig(guildId);
+
+    if (interaction.customId === 'open_ticket') {
+      await interaction.deferReply({ flags: ['Ephemeral'] });
+      try {
+        const guild = interaction.guild;
+        const user  = interaction.user;
+        const ticketCatId = cfg.ticketCategoryId;
+
+        const existing = guild.channels.cache.find(
+          c => c.name === `ticket-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '')}` &&
+               (!ticketCatId || c.parentId === ticketCatId)
+        );
+        if (existing) return interaction.editReply({ content: `❌ Ya tienes un ticket abierto: <#${existing.id}>` });
+
+        const permOverwrites = [
+          { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
+          { id: user.id, type: 1, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
+          { id: client.user.id, type: 1, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.ManageChannels] },
+        ];
+        if (cfg.ticketRoles && cfg.ticketRoles.staff) permOverwrites.push({ id: cfg.ticketRoles.staff, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] });
+        if (cfg.ticketRoles && cfg.ticketRoles.owner) permOverwrites.push({ id: cfg.ticketRoles.owner, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] });
+
+        const ticketCh = await guild.channels.create({
+          name: `ticket-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
+          type: ChannelType.GuildText,
+          parent: ticketCatId || null,
+          permissionOverwrites: permOverwrites
+        });
+
+        const closeRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('close_ticket').setLabel('🔒 Cerrar Ticket').setStyle(ButtonStyle.Danger)
+        );
+        const welcomeEmbed = new EmbedBuilder()
+          .setTitle(`🎫 Ticket de ${user.username}`)
+          .setDescription(`Hola <@${user.id}>, el Staff te atenderá **inmediatamente**.\n\nDescribe tu consulta y espera la respuesta.`)
+          .setColor(0x9B59B6)
+          .setTimestamp();
+
+        const mentions = [
+          `<@${user.id}>`,
+          cfg.ticketRoles && cfg.ticketRoles.staff ? `<@&${cfg.ticketRoles.staff}>` : '',
+          cfg.ticketRoles && cfg.ticketRoles.owner ? `<@&${cfg.ticketRoles.owner}>` : '',
+        ].filter(Boolean).join(' ');
+
+        await ticketCh.send({ content: mentions, embeds: [welcomeEmbed], components: [closeRow] });
+        await interaction.editReply({ content: `✅ Tu ticket fue creado: <#${ticketCh.id}>` });
+        await sendLog(guild, `🎫 **Nuevo ticket** de ${user.tag} → <#${ticketCh.id}>`, 0x9B59B6);
+      } catch(e) {
+        await interaction.editReply({ content: '❌ Error al crear el ticket. Intenta de nuevo.' });
+      }
+      return;
+    }
+
+    // 🔒 CERRAR TICKET (cubre close_ticket y close_ticket_XXXXXX de tickets viejos)
+    if (interaction.customId === 'close_ticket' || interaction.customId.startsWith('close_ticket_')) {
+      await interaction.deferReply({ flags: ['Ephemeral'] });
+      try {
+        const ch = interaction.channel;
+        const msg = interaction.message;
+        const user = interaction.user;
+        const member = interaction.member;
+
+        // Cualquiera puede cerrar: el que abrió el ticket, staff o admin
+        // Solo bloqueamos si es un miembro sin ningún permiso especial
+        // (en canal de soporte público, solo staff/admin)
+        const isTicketChannel = ch.name.startsWith('ticket-');
+        const canClose = isTicketChannel ||
+          isStaff(member) ||
+          member.permissions.has(PermissionsBitField.Flags.Administrator) ||
+          member.permissions.has(PermissionsBitField.Flags.ManageChannels) ||
+          member.permissions.has(PermissionsBitField.Flags.ManageGuild);
+
+        if (!canClose) {
+          return interaction.editReply({ content: '❌ Solo el Staff puede cerrar tickets.' });
+        }
+
+        // Embed de cierre bonito
+        const closeEmbed = new EmbedBuilder()
+          .setTitle('🔒 Ticket Cerrado')
+          .setDescription(`Este ticket ha sido **cerrado** por <@${user.id}>.`)
+          .setThumbnail(user.displayAvatarURL({ forceStatic: false }))
+          .addFields(
+            { name: '👤 Cerrado por', value: `**${user.username}**`, inline: true },
+            { name: '📅 Fecha', value: `<t:${Math.floor(Date.now()/1000)}:F>`, inline: true },
+          )
+          .setColor(0xFF4500)
+          .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com' })
+          .setTimestamp();
+
+        // Deshabilitar botones del mensaje original
+        const disabledRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('close_ticket').setLabel('🔒 Ticket Cerrado').setStyle(ButtonStyle.Danger).setDisabled(true),
+          new ButtonBuilder().setCustomId('claim_ticket').setLabel('🔒 Cerrado').setStyle(ButtonStyle.Secondary).setDisabled(true),
+        );
+        await msg.edit({ components: [disabledRow] }).catch(() => {});
+
+        if (isTicketChannel) {
+          // Canal privado de ticket: enviar embed y eliminar en 8s
+          await ch.send({ embeds: [closeEmbed] });
+          setTimeout(() => ch.delete().catch(() => {}), 8000);
+        } else {
+          // Canal de soporte: solo deshabilitar botones y enviar embed en el canal
+          await ch.send({ embeds: [closeEmbed] }).catch(() => {});
+        }
+
+        await interaction.editReply({ content: '✅ Ticket cerrado correctamente.' });
+        await sendLog(interaction.guild, `🔒 **Ticket cerrado** por ${user.tag} en <#${ch.id}>`, 0xFF4500);
+      } catch(e) {
+        try { await interaction.editReply({ content: '❌ Error al cerrar el ticket: ' + e.message }); } catch(_) {}
+      }
+      return;
+    }
+
+    // ✋ TOMAR TICKET (cubre claim_ticket y claim_ticket_XXXXXX de tickets viejos)
+    if (interaction.customId === 'claim_ticket' || interaction.customId.startsWith('claim_ticket_')) {
+      await interaction.deferReply({ flags: ['Ephemeral'] });
+      try {
+        const user = interaction.user;
+        const member = interaction.member;
+        const msg = interaction.message;
+
+        // Solo staff/admin puede tomar tickets
+        if (!isStaff(member) &&
+            !member.permissions.has(PermissionsBitField.Flags.Administrator) &&
+            !member.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+          return interaction.editReply({ content: '❌ Solo el Staff puede tomar tickets.' });
+        }
+
+        // Verificar si ya fue tomado (botón deshabilitado)
+        const alreadyClaimed = msg.components[0]?.components?.find(c => c.customId === 'claim_ticket')?.disabled;
+        if (alreadyClaimed) {
+          return interaction.editReply({ content: '❌ Este ticket ya fue tomado por otro miembro del Staff.' });
+        }
+
+        // Actualizar botones del mensaje original
+        const updatedRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('close_ticket').setLabel('🔒 Cerrar Ticket').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId('claim_ticket').setLabel(`✅ Tomado`).setStyle(ButtonStyle.Success).setDisabled(true),
+        );
+        await msg.edit({ components: [updatedRow] }).catch(() => {});
+
+        // Embed bonito de "ticket tomado"
+        const claimEmbed = new EmbedBuilder()
+          .setTitle('✋ Ticket Tomado')
+          .setDescription(`<@${user.id}> ha tomado este ticket y se encargará de atenderte.\n\nPor favor espera mientras el Staff revisa tu consulta.`)
+          .setThumbnail(user.displayAvatarURL({ forceStatic: false }))
+          .addFields(
+            { name: '👮 Staff asignado', value: `**${member.nickname || user.username}**`, inline: true },
+            { name: '🏷️ Etiqueta', value: `\`${user.tag}\``, inline: true },
+            { name: '📅 Hora', value: `<t:${Math.floor(Date.now()/1000)}:t>`, inline: true },
+          )
+          .setColor(0x57F287)
+          .setFooter({ text: 'DS6 Bot v3.0 • ds6music.com • El Staff está en camino' })
+          .setTimestamp();
+
+        await interaction.channel.send({ embeds: [claimEmbed] }).catch(() => {});
+        await interaction.editReply({ content: `✅ Has tomado el ticket. Ahora eres el responsable de atenderlo.` });
+        await sendLog(interaction.guild, `✋ **Ticket tomado** por ${user.tag} en <#${interaction.channel.id}>`, 0x57F287);
+      } catch(e) {
+        try { await interaction.editReply({ content: '❌ Error al tomar el ticket: ' + e.message }); } catch(_) {}
+      }
+      return;
+    }
+
+    // ── Botones del menú !comandos ──
+    const cmdButtons = {
+      'cmd_diversion': {
+        title: '🎮 Comandos de Diversión',
+        color: 0x3498DB,
+        desc: '`!8ball [pregunta]` — Bola mágica\n`!dado [caras]` — Tirar dado (ej: `!dado 20`)\n`!moneda` — Cara o cruz\n`!chiste` — Chiste aleatorio\n`!abrazo @user` — Abrazar\n`!beso @user` — Besar\n`!slap @user` — Golpear\n`!meme` — Meme aleatorio\n`!rps piedra/papel/tijera` — Piedra Papel Tijera (+10 coins si ganas)\n`!trivia` — Pregunta trivia (+25 coins si aciertas)\n`!verdadoreto [verdad/reto] [@user]` — Verdad o Reto\n`!bailar` `!llorar` `!dormir` `!comer` `!highfive @user`'
+      },
+      'cmd_economia': {
+        title: '💰 Comandos de Economía',
+        color: 0xF1C40F,
+        desc: '`!coins` — Ver tus DS6 Coins\n`!daily` — Recompensa diaria (cada 24h)\n`!trabajo` — Trabajar y ganar coins (cada 4h)\n`!robar @user` — Intentar robar coins (45% éxito, cada 2h)\n`!transferir @user [cantidad]` — Transferir coins\n`!topcoins` — Top 10 más ricos del servidor\n`!invitaciones` — Ver tus tickets de sorteo\n`!canjear [código]` — Canjear código de recompensa'
+      },
+      'cmd_mod': {
+        title: '🛡️ Comandos de Moderación (Solo Staff)',
+        color: 0xFF4500,
+        desc: '`!kick @user [razón]` — Expulsar usuario\n`!ban @user [razón]` — Banear usuario\n`!unban [ID]` — Desbanear por ID\n`!silenciar @user [tiempo] [razón]` — Silenciar (ej: `10m`, `2h`)\n`!desilenciar @user` — Quitar silencio\n`!warn @user [razón]` — Advertir (auto-mute x3, auto-ban x5)\n`!warnings @user` — Ver advertencias\n`!clearwarns @user` — Borrar advertencias\n`!clear [1-100]` — Borrar mensajes\n`!lock` / `!unlock` — Bloquear/desbloquear canal\n`!slowmode [seg]` — Modo lento\n`!nick @user [apodo]` — Cambiar apodo\n`!banlist` — Ver lista de bans'
+      },
+      'cmd_config': {
+        title: '⚙️ Comandos de Configuración (Solo Admin)',
+        color: 0x9B59B6,
+        desc: '`!setup` — Configurar el bot automáticamente\n`!config` — Ver configuración actual\n`!bienvenida canal #canal` — Canal de bienvenida\n`!bienvenida mensaje [texto]` — Mensaje personalizado\n`!bienvenida on/off` — Activar/desactivar bienvenida\n`!autoroles add @rol` — Agregar auto-rol\n`!autoroles ver` — Ver auto-roles\n`!antispam on/off` — Activar anti-spam\n`!setcanal [tipo] #canal` — Configurar canal\n`!setrol [nivel] @rol` — Configurar rol de nivel\n`!sorteo meta [N]` — Cambiar meta del sorteo\n`!idioma es/en/pt` — Cambiar idioma del bot'
+      },
+      'cmd_util': {
+        title: '🔧 Comandos de Utilidades',
+        color: 0x00E676,
+        desc: '`!tag add [nombre] [respuesta]` — Crear etiqueta\n`!tag [nombre]` — Mostrar etiqueta\n`!tag list` — Ver todas las etiquetas\n`!poll [pregunta] | opción1 | opción2` — Encuesta\n`!calc [expresión]` — Calculadora\n`!recordatorio [tiempo] [texto]` — Recordatorio\n`!ping` — Ver latencia del bot\n`!botinfo` — Información del bot\n`!userinfo [@user]` — Info de usuario\n`!serverinfo` — Info del servidor\n`!avatar [@user]` — Ver avatar\n`!reglas` — Ver reglas del servidor\n`!ticket [consulta]` — Crear ticket de soporte'
+      }
+    };
+
+    if (cmdButtons[interaction.customId]) {
+      const btn = cmdButtons[interaction.customId];
+      const embed = new EmbedBuilder().setTitle(btn.title).setDescription(btn.desc).setColor(btn.color).setFooter({ text: 'DS6 Bot v3.0 • ds6music.com • Prefijo: ! • !comandos para volver' });
+      return await interaction.reply({ embeds: [embed], flags: ['Ephemeral'] });
+    }
+
+    return; // botón no reconocido
   }
 
-  if (!interaction.guild) return;
-  const guildId = interaction.guild.id;
-  const cfg = loadConfig(guildId);
+  // ── SLASH COMMANDS ──
+  if (interaction.isChatInputCommand()) {
+    const slashGuildId = interaction.guild?.id;
+    const slashUserId = interaction.user.id;
 
-  if (interaction.customId === 'open_ticket') {
-    await interaction.deferReply({ flags: ['Ephemeral'] });
-    try {
-      const guild = interaction.guild;
-      const user  = interaction.user;
-      const ticketCatId = cfg.ticketCategoryId;
-
-      const existing = guild.channels.cache.find(
-        c => c.name === `ticket-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '')}` &&
-             (!ticketCatId || c.parentId === ticketCatId)
-      );
-      if (existing) return interaction.editReply({ content: `❌ Ya tienes un ticket abierto: <#${existing.id}>` });
-
-      const permOverwrites = [
-        { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
-        { id: user.id, type: 1, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
-        { id: client.user.id, type: 1, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.ManageChannels] },
-      ];
-      if (cfg.ticketRoles && cfg.ticketRoles.staff) permOverwrites.push({ id: cfg.ticketRoles.staff, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] });
-      if (cfg.ticketRoles && cfg.ticketRoles.owner) permOverwrites.push({ id: cfg.ticketRoles.owner, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] });
-
-      const ticketCh = await guild.channels.create({
-        name: `ticket-${user.username.toLowerCase().replace(/[^a-z0-9]/g, '-')}`,
-        type: ChannelType.GuildText,
-        parent: ticketCatId || null,
-        permissionOverwrites: permOverwrites
-      });
-
-      const closeRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('close_ticket').setLabel('🔒 Cerrar Ticket').setStyle(ButtonStyle.Danger)
-      );
-      const welcomeEmbed = new EmbedBuilder()
-        .setTitle(`🎫 Ticket de ${user.username}`)
-        .setDescription(`Hola <@${user.id}>, el Staff te atenderá **inmediatamente**.\n\nDescribe tu consulta y espera la respuesta.`)
-        .setColor(0x9B59B6)
+    // /info
+    if (interaction.commandName === 'info') {
+      const uptime = process.uptime();
+      const d = Math.floor(uptime / 86400);
+      const h = Math.floor((uptime % 86400) / 3600);
+      const m = Math.floor((uptime % 3600) / 60);
+      const ping = Math.round(client.ws.ping);
+      const embed = new EmbedBuilder()
+        .setTitle('🤖 DS6 Bot — Información')
+        .setDescription('> Bot oficial de la comunidad DS6 — Economía, niveles, moderación, diversión y más.')
+        .setColor(0x5865F2)
+        .setThumbnail(client.user.displayAvatarURL())
+        .addFields(
+          { name: '📛 Nombre', value: `**${client.user.tag}**`, inline: true },
+          { name: '📡 Servidores', value: `**${client.guilds.cache.size}**`, inline: true },
+          { name: '📦 Versión', value: '**v3.0**', inline: true },
+          { name: '⏱️ Uptime', value: `**${d}d ${h}h ${m}m**`, inline: true },
+          { name: '🏓 Ping', value: `**${ping > 0 ? ping : '< 1'}ms**`, inline: true },
+          { name: '🌐 Sitio Web', value: '[ds6music.com](https://ds6music.com)', inline: true },
+          { name: '\u200b', value: '\u200b', inline: false },
+          { name: '🤖 DS6 Bot', value: 'Bot multi-servidor con moderación, economía, niveles, tickets y más.', inline: false }
+        )
+        .setFooter({ text: '❤️ Desarrollado con pasión por Daddy • DS6 Bot v3.0 • ds6music.com' })
         .setTimestamp();
-
-      const mentions = [
-        `<@${user.id}>`,
-        cfg.ticketRoles && cfg.ticketRoles.staff ? `<@&${cfg.ticketRoles.staff}>` : '',
-        cfg.ticketRoles && cfg.ticketRoles.owner ? `<@&${cfg.ticketRoles.owner}>` : '',
-      ].filter(Boolean).join(' ');
-
-      await ticketCh.send({ content: mentions, embeds: [welcomeEmbed], components: [closeRow] });
-      await interaction.editReply({ content: `✅ Tu ticket fue creado: <#${ticketCh.id}>` });
-      await sendLog(guild, `🎫 **Nuevo ticket** de ${user.tag} → <#${ticketCh.id}>`, 0x9B59B6);
-    } catch(e) {
-      await interaction.editReply({ content: '❌ Error al crear el ticket. Intenta de nuevo.' });
+      return await interaction.reply({ embeds: [embed] });
     }
-  }
 
-  if (interaction.customId === 'close_ticket') {
-    await interaction.deferReply({ flags: ['Ephemeral'] });
-    try {
-      const ch = interaction.channel;
-      if (!ch.name.startsWith('ticket-')) return interaction.editReply({ content: '❌ Este comando solo funciona dentro de un ticket.' });
-      await interaction.editReply({ content: '🔒 Cerrando ticket...' });
-      await ch.send('🔒 **Ticket cerrado.** El canal se eliminará en 5 segundos.');
-      setTimeout(() => ch.delete().catch(() => {}), 5000);
-      await sendLog(interaction.guild, `🔒 **Ticket cerrado** por ${interaction.user.tag}: #${ch.name}`, 0xFF4500);
-    } catch(e) {}
-  }
-
-  // ── Botones del menú !comandos ──
-  const cmdButtons = {
-    'cmd_diversion': {
-      title: '🎮 Comandos de Diversión',
-      color: 0x3498DB,
-      desc: '`!8ball [pregunta]` — Bola mágica\n`!dado [caras]` — Tirar dado (ej: `!dado 20`)\n`!moneda` — Cara o cruz\n`!chiste` — Chiste aleatorio\n`!abrazo @user` — Abrazar\n`!beso @user` — Besar\n`!slap @user` — Golpear\n`!meme` — Meme aleatorio\n`!rps piedra/papel/tijera` — Piedra Papel Tijera (+10 coins si ganas)\n`!trivia` — Pregunta trivia (+25 coins si aciertas)\n`!verdadoreto [verdad/reto] [@user]` — Verdad o Reto\n`!bailar` `!llorar` `!dormir` `!comer` `!highfive @user`'
-    },
-    'cmd_economia': {
-      title: '💰 Comandos de Economía',
-      color: 0xF1C40F,
-      desc: '`!coins` — Ver tus DS6 Coins\n`!daily` — Recompensa diaria (cada 24h)\n`!trabajo` — Trabajar y ganar coins (cada 4h)\n`!robar @user` — Intentar robar coins (45% éxito, cada 2h)\n`!transferir @user [cantidad]` — Transferir coins\n`!topcoins` — Top 10 más ricos del servidor\n`!invitaciones` — Ver tus tickets de sorteo\n`!canjear [código]` — Canjear código de recompensa'
-    },
-    'cmd_mod': {
-      title: '🛡️ Comandos de Moderación (Solo Staff)',
-      color: 0xFF4500,
-      desc: '`!kick @user [razón]` — Expulsar usuario\n`!ban @user [razón]` — Banear usuario\n`!unban [ID]` — Desbanear por ID\n`!silenciar @user [tiempo] [razón]` — Silenciar (ej: `10m`, `2h`)\n`!desilenciar @user` — Quitar silencio\n`!warn @user [razón]` — Advertir (auto-mute x3, auto-ban x5)\n`!warnings @user` — Ver advertencias\n`!clearwarns @user` — Borrar advertencias\n`!clear [1-100]` — Borrar mensajes\n`!lock` / `!unlock` — Bloquear/desbloquear canal\n`!slowmode [seg]` — Modo lento\n`!nick @user [apodo]` — Cambiar apodo\n`!banlist` — Ver lista de bans'
-    },
-    'cmd_config': {
-      title: '⚙️ Comandos de Configuración (Solo Admin)',
-      color: 0x9B59B6,
-      desc: '`!setup` — Configurar el bot automáticamente\n`!config` — Ver configuración actual\n`!bienvenida canal #canal` — Canal de bienvenida\n`!bienvenida mensaje [texto]` — Mensaje personalizado\n`!bienvenida on/off` — Activar/desactivar bienvenida\n`!autoroles add @rol` — Agregar auto-rol\n`!autoroles ver` — Ver auto-roles\n`!antispam on/off` — Activar anti-spam\n`!setcanal [tipo] #canal` — Configurar canal\n`!setrol [nivel] @rol` — Configurar rol de nivel\n`!sorteo meta [N]` — Cambiar meta del sorteo\n`!idioma es/en/pt` — Cambiar idioma del bot'
-    },
-    'cmd_util': {
-      title: '🔧 Comandos de Utilidades',
-      color: 0x00E676,
-      desc: '`!tag add [nombre] [respuesta]` — Crear etiqueta\n`!tag [nombre]` — Mostrar etiqueta\n`!tag list` — Ver todas las etiquetas\n`!poll [pregunta] | opción1 | opción2` — Encuesta\n`!calc [expresión]` — Calculadora\n`!recordatorio [tiempo] [texto]` — Recordatorio\n`!ping` — Ver latencia del bot\n`!botinfo` — Información del bot\n`!userinfo [@user]` — Info de usuario\n`!serverinfo` — Info del servidor\n`!avatar [@user]` — Ver avatar\n`!reglas` — Ver reglas del servidor\n`!ticket [consulta]` — Crear ticket de soporte'
+    // /ping
+    if (interaction.commandName === 'ping') {
+      return await interaction.reply({ content: `🏓 Pong! Latencia: **${client.ws.ping}ms**`, flags: ['Ephemeral'] });
     }
-  };
 
-  if (cmdButtons[interaction.customId]) {
-    const btn = cmdButtons[interaction.customId];
-    const embed = new EmbedBuilder().setTitle(btn.title).setDescription(btn.desc).setColor(btn.color).setFooter({ text: 'DS6 Bot v3.0 • Prefijo: ! • !comandos para volver' });
-    return interaction.reply({ embeds: [embed], flags: ['Ephemeral'] });
-  }
-});
+    // /ayuda
+    if (interaction.commandName === 'ayuda') {
+      const embed = new EmbedBuilder()
+        .setTitle('📋 DS6 Bot — Comandos')
+        .setColor(0x5865F2)
+        .setDescription('Usa `!comandos` para ver el menú interactivo completo con botones por categoría.')
+        .addFields(
+          { name: '💰 Economía', value: '`!coins` `!daily` `!trabajo` `!transferir` `!topcoins`', inline: false },
+          { name: '📊 Niveles', value: '`!nivel` `!top` `!perfil`', inline: false },
+          { name: '🎮 Diversión', value: '`!8ball` `!rps` `!trivia` `!chiste` `!dado` `!abrazo`', inline: false },
+          { name: '🛡️ Moderación', value: '`!kick` `!ban` `!silenciar` `!warn` `!clear` `!lock`', inline: false },
+          { name: '⚙️ Config', value: '`!setup` `!bienvenida` `!autoroles` `!config` `!sorteo`', inline: false },
+          { name: '🔧 Utilidades', value: '`!ping` `!botinfo` `!userinfo` `!serverinfo` `!ticket`', inline: false }
+        )
+        .setFooter({ text: 'DS6 Bot v3.0 • Prefijo: !' });
+      return await interaction.reply({ embeds: [embed], flags: ['Ephemeral'] });
+    }
 
-// ══════════════════════════════════════════════════════
-//  SLASH COMMAND: /info
-// ══════════════════════════════════════════════════════
-client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName === 'info') {
-    const uptime = process.uptime();
-    const days = Math.floor(uptime / 86400);
-    const hours = Math.floor((uptime % 86400) / 3600);
-    const mins = Math.floor((uptime % 3600) / 60);
-    const ping = Math.round(client.ws.ping);
-    const embed = new EmbedBuilder()
-      .setTitle('🤖 DS6 Bot — Información')
-      .setThumbnail(client.user.displayAvatarURL({ forceStatic: false }))
-      .setDescription('Bot oficial de la comunidad **DS6Music** — Economía, niveles, moderación, diversión y más.')
-      .addFields(
-        { name: '📛 Nombre', value: `**${client.user.tag}**`, inline: true },
-        { name: '📡 Servidores', value: `**${client.guilds.cache.size}**`, inline: true },
-        { name: '📦 Versión', value: '**v3.0**', inline: true },
-        { name: '⏱️ Uptime', value: `**${days}d ${hours}h ${mins}m**`, inline: true },
-        { name: '🏓 Ping', value: `**${ping > 0 ? ping : '< 1'}ms**`, inline: true },
-        { name: '🌐 Sitio Web', value: '[ds6music.com](https://ds6music.com)', inline: true },
-        { name: '\u200b', value: '\u200b', inline: false },
-        { name: '👑 Creado por', value: '**Daddy** — *Senior Developer & Fundador de DS6Music*\n🎵 La mente detrás de todo lo que ves aquí.', inline: false },
-      )
-      .setColor(0x8B0000)
-      .setFooter({ text: '❤️ Desarrollado con pasión por Daddy • DS6 Bot v3.0 • ds6music.com' })
-      .setTimestamp();
-    return interaction.reply({ embeds: [embed] });
+    // /nivel
+    if (interaction.commandName === 'nivel') {
+      if (!slashGuildId) return await interaction.reply({ content: 'Este comando solo funciona en servidores.', flags: ['Ephemeral'] });
+      const xpData = loadXP(slashGuildId);
+      const user = xpData[slashUserId] || { xp: 0, level: 0 };
+      const nextLevelXp = (user.level + 1) * 100;
+      const embed = new EmbedBuilder()
+        .setTitle(`📊 Nivel de ${interaction.user.username}`)
+        .setColor(0x00E676)
+        .setThumbnail(interaction.user.displayAvatarURL())
+        .addFields(
+          { name: '⭐ Nivel', value: `${user.level}`, inline: true },
+          { name: '✨ XP', value: `${user.xp} / ${nextLevelXp}`, inline: true }
+        )
+        .setFooter({ text: 'DS6 Bot v3.0' });
+      return await interaction.reply({ embeds: [embed] });
+    }
+
+    // /coins
+    if (interaction.commandName === 'coins') {
+      if (!slashGuildId) return await interaction.reply({ content: 'Este comando solo funciona en servidores.', flags: ['Ephemeral'] });
+      const coinsData = loadCoins(slashGuildId);
+      const coins = coinsData[slashUserId] || 0;
+      const embed = new EmbedBuilder()
+        .setTitle(`💰 Coins de ${interaction.user.username}`)
+        .setColor(0xF1C40F)
+        .setDescription(`Tienes **${coins.toLocaleString()} DS6 Coins** 🪙`)
+        .setFooter({ text: 'DS6 Bot v3.0 • Usa !daily para ganar más coins' });
+      return await interaction.reply({ embeds: [embed] });
+    }
+
+    // /perfil
+    if (interaction.commandName === 'perfil') {
+      if (!slashGuildId) return await interaction.reply({ content: 'Este comando solo funciona en servidores.', flags: ['Ephemeral'] });
+      const xpData = loadXP(slashGuildId);
+      const coinsData = loadCoins(slashGuildId);
+      const invDataRaw = loadInvites(slashGuildId);
+      const user = xpData[slashUserId] || { xp: 0, level: 0 };
+      const coins = coinsData[slashUserId] || 0;
+      const inv = invDataRaw.invites[slashUserId] || { count: 0 };
+      const member = interaction.member;
+      const embed = new EmbedBuilder()
+        .setTitle(`👤 Perfil de ${interaction.user.username}`)
+        .setColor(0x5865F2)
+        .setThumbnail(interaction.user.displayAvatarURL())
+        .addFields(
+          { name: '⭐ Nivel', value: `${user.level}`, inline: true },
+          { name: '✨ XP', value: `${user.xp}`, inline: true },
+          { name: '💰 Coins', value: `${coins.toLocaleString()}`, inline: true },
+          { name: '📨 Invitaciones', value: `${inv.count || 0}`, inline: true },
+          { name: '📅 En el servidor desde', value: member ? `<t:${Math.floor(member.joinedTimestamp/1000)}:R>` : 'N/A', inline: true }
+        )
+        .setFooter({ text: 'DS6 Bot v3.0' });
+      return await interaction.reply({ embeds: [embed] });
+    }
+
+    // /top
+    if (interaction.commandName === 'top') {
+      if (!slashGuildId) return await interaction.reply({ content: 'Este comando solo funciona en servidores.', flags: ['Ephemeral'] });
+      const xpData = loadXP(slashGuildId);
+      const sorted = Object.entries(xpData).sort((a,b) => (b[1].xp||0)-(a[1].xp||0)).slice(0,10);
+      const medals = ['🥇','🥈','🥉','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
+      const desc = sorted.length ? sorted.map((e,i) => `${medals[i]} <@${e[0]}> — Nivel **${e[1].level||0}** • ${e[1].xp||0} XP`).join('\n') : 'No hay datos aún.';
+      const embed = new EmbedBuilder()
+        .setTitle('🏆 Top 10 — Ranking XP')
+        .setColor(0xF1C40F)
+        .setDescription(desc)
+        .setFooter({ text: 'DS6 Bot v3.0' });
+      return await interaction.reply({ embeds: [embed] });
+    }
+
+    // /invitaciones
+    if (interaction.commandName === 'invitaciones') {
+      if (!slashGuildId) return await interaction.reply({ content: 'Este comando solo funciona en servidores.', flags: ['Ephemeral'] });
+      const invDataRaw = loadInvites(slashGuildId);
+      const inv = invDataRaw.invites[slashUserId] || { count: 0 };
+      const tickets = 1 + (inv.count || 0);
+      const embed = new EmbedBuilder()
+        .setTitle(`📨 Invitaciones de ${interaction.user.username}`)
+        .setColor(0x5865F2)
+        .addFields(
+          { name: '👥 Invitaciones', value: `${inv.count || 0}`, inline: true },
+          { name: '🎫 Tickets de sorteo', value: `${tickets}`, inline: true }
+        )
+        .setFooter({ text: 'DS6 Bot v3.0 • Más invitaciones = más tickets' });
+      return await interaction.reply({ embeds: [embed] });
+    }
+
+    return; // slash command no reconocido
   }
+
+  // ── CONTEXT MENU COMMANDS ──
+  if (interaction.isUserContextMenuCommand() || interaction.isMessageContextMenuCommand()) {
+    const targetUser = interaction.isUserContextMenuCommand() ? interaction.targetUser : null;
+    const ctxGuildId = interaction.guild?.id;
+
+    // Ver Perfil DS6 (clic derecho en usuario)
+    if (interaction.commandName === 'Ver Perfil DS6') {
+      const uid = targetUser.id;
+      const xpData = ctxGuildId ? loadXP(ctxGuildId) : {};
+      const coinsData = ctxGuildId ? loadCoins(ctxGuildId) : {};
+      const invDataRaw = ctxGuildId ? loadInvites(ctxGuildId) : { invites: {} };
+      const userXp = xpData[uid] || { xp: 0, level: 0 };
+      const coins = coinsData[uid] || 0;
+      const inv = invDataRaw.invites[uid] || { count: 0 };
+      const member = ctxGuildId ? interaction.guild.members.cache.get(uid) : null;
+      const embed = new EmbedBuilder()
+        .setTitle(`👤 Perfil de ${targetUser.username}`)
+        .setColor(0x5865F2)
+        .setThumbnail(targetUser.displayAvatarURL())
+        .addFields(
+          { name: '⭐ Nivel', value: `${userXp.level}`, inline: true },
+          { name: '✨ XP', value: `${userXp.xp}`, inline: true },
+          { name: '💰 DS6 Coins', value: `${coins.toLocaleString()}`, inline: true },
+          { name: '📨 Invitaciones', value: `${inv.count || 0}`, inline: true },
+          { name: '🎫 Tickets sorteo', value: `${1 + (inv.count || 0)}`, inline: true },
+          { name: '📅 En el servidor', value: member ? `<t:${Math.floor(member.joinedTimestamp/1000)}:R>` : 'N/A', inline: true }
+        )
+        .setFooter({ text: 'DS6 Bot v3.0' });
+      return await interaction.reply({ embeds: [embed], flags: ['Ephemeral'] });
+    }
+
+    // Ver Coins DS6 (clic derecho en usuario)
+    if (interaction.commandName === 'Ver Coins DS6') {
+      const uid = targetUser.id;
+      const coinsData = ctxGuildId ? loadCoins(ctxGuildId) : {};
+      const coins = coinsData[uid] || 0;
+      const embed = new EmbedBuilder()
+        .setTitle(`💰 Coins de ${targetUser.username}`)
+        .setColor(0xF1C40F)
+        .setThumbnail(targetUser.displayAvatarURL())
+        .setDescription(`**${targetUser.username}** tiene **${coins.toLocaleString()} DS6 Coins** 🪙`)
+        .setFooter({ text: 'DS6 Bot v3.0' });
+      return await interaction.reply({ embeds: [embed], flags: ['Ephemeral'] });
+    }
+
+    // Ver Nivel DS6 (clic derecho en usuario)
+    if (interaction.commandName === 'Ver Nivel DS6') {
+      const uid = targetUser.id;
+      const xpData = ctxGuildId ? loadXP(ctxGuildId) : {};
+      const userXp = xpData[uid] || { xp: 0, level: 0 };
+      const nextLvl = (userXp.level + 1) * 100;
+      const embed = new EmbedBuilder()
+        .setTitle(`📊 Nivel de ${targetUser.username}`)
+        .setColor(0x00E676)
+        .setThumbnail(targetUser.displayAvatarURL())
+        .addFields(
+          { name: '⭐ Nivel', value: `${userXp.level}`, inline: true },
+          { name: '✨ XP', value: `${userXp.xp} / ${nextLvl}`, inline: true }
+        )
+        .setFooter({ text: 'DS6 Bot v3.0' });
+      return await interaction.reply({ embeds: [embed], flags: ['Ephemeral'] });
+    }
+
+    // Ver Invitaciones DS6 (clic derecho en usuario)
+    if (interaction.commandName === 'Ver Invitaciones DS6') {
+      const uid = targetUser.id;
+      const invDataRaw2 = ctxGuildId ? loadInvites(ctxGuildId) : { invites: {} };
+      const inv = invDataRaw2.invites[uid] || { count: 0 };
+      const embed = new EmbedBuilder()
+        .setTitle(`📨 Invitaciones de ${targetUser.username}`)
+        .setColor(0x5865F2)
+        .setThumbnail(targetUser.displayAvatarURL())
+        .addFields(
+          { name: '👥 Invitaciones', value: `${inv.count || 0}`, inline: true },
+          { name: '🎫 Tickets sorteo', value: `${1 + (inv.count || 0)}`, inline: true }
+        )
+        .setFooter({ text: 'DS6 Bot v3.0' });
+      return await interaction.reply({ embeds: [embed], flags: ['Ephemeral'] });
+    }
+
+    // Reportar Mensaje (clic derecho en mensaje)
+    if (interaction.commandName === 'Reportar Mensaje') {
+      const msg = interaction.targetMessage;
+      const logCh = ctxGuildId ? loadConfig(ctxGuildId).channels?.logs : null;
+      const logChannel = logCh ? interaction.guild?.channels.cache.get(logCh) : null;
+      const embed = new EmbedBuilder()
+        .setTitle('⚠️ Mensaje Reportado')
+        .setColor(0xFF4500)
+        .addFields(
+          { name: '👤 Autor', value: `${msg.author.tag}`, inline: true },
+          { name: '📍 Canal', value: `<#${msg.channelId}>`, inline: true },
+          { name: '📝 Contenido', value: msg.content || '*[Sin texto]*', inline: false }
+        )
+        .setFooter({ text: `Reportado por ${interaction.user.tag}` })
+        .setTimestamp();
+      if (logChannel) await logChannel.send({ embeds: [embed] }).catch(() => {});
+      return await interaction.reply({ content: '✅ Mensaje reportado al staff del servidor.', flags: ['Ephemeral'] });
+    }
+
+    return; // context menu no reconocido
+  }
+
 });
 
 // ══════════════════════════════════════════════════════
@@ -3028,8 +3896,8 @@ client.on(Events.MessageCreate, async (message) => {
         { name: '🎮 Diversión', value: '`!8ball` `!dado` `!moneda` `!chiste`\n`!abrazo` `!beso` `!slap` `!meme`\n`!rps` `!trivia` `!verdadoreto`\n`!bailar` `!llorar` `!comer` `!dormir`', inline: true },
         { name: '💰 Economía', value: '`!coins` `!daily` `!trabajo`\n`!transferir` `!robar` `!topcoins`\n`!invitaciones` `!canjear`', inline: true },
         { name: '📊 Perfil', value: '`!nivel` `!top` `!perfil`\n`!userinfo` `!avatar`\n`!serverinfo` `!botinfo`\n`!ping`', inline: true },
-        { name: '🛡️ Moderación (Staff)', value: '`!kick` `!ban` `!unban`\n`!silenciar` `!desilenciar`\n`!warn` `!warnings` `!clearwarns`\n`!clear` `!lock` `!unlock`\n`!slowmode` `!nick` `!banlist`', inline: true },
-        { name: '⚙️ Config (Admin)', value: '`!setup` `!config` `!bienvenida`\n`!autoroles` `!antispam`\n`!setcanal` `!setrol` `!sorteo`\n`!idioma` `!tag`', inline: true },
+        { name: '🛡️ Moderación (Staff)', value: '`!kick` `!ban` `!unban`\n`!silenciar` `!desilenciar`\n`!warn` `!warnings` `!clearwarns`\n`!clear` `!lock` `!unlock`\n`!slowmode` `!nick` `!banlist`\n`!privado`', inline: true },
+        { name: '⚙️ Config (Admin)', value: '`!setup` `!config` `!bienvenida`\n`!autoroles` `!antispam`\n`!setcanal` `!setrol` `!sorteo`\n`!idioma` `!tag`\n`!editar` `!link`', inline: true },
         { name: '🎫 Tickets & Más', value: '`!ticket [consulta]`\n`!poll` `!calc` `!recordatorio`\n`!traducir` `!reglas` `!precio`', inline: true },
       )
       .setColor(0x8B0000)
@@ -3046,15 +3914,22 @@ client.on(Events.MessageCreate, async (message) => {
         '1️⃣ Agrega el bot a tu servidor con `!invitar`\n' +
         '2️⃣ Usa `!setup` para configurarlo automáticamente\n' +
         '3️⃣ Los miembros pueden usar `!nivel`, `!coins`, `!daily`\n' +
-        '4️⃣ El staff puede moderar con `!kick`, `!ban`, `!warn`\n' +
-        '5️⃣ Personaliza con `!bienvenida`, `!autoroles`, `!config`\n\n' +
+        '4️⃣ El staff puede moderar con `!kick`, `!ban`, `!warn`\n' +        '5️⃣ Personaliza con `!bienvenida`, `!autoroles`, `!config`\n' +
+        '6️⃣ Edita mensajes del servidor con `!editar`\n' +
+        '7️⃣ Genera el link permanente con `!link`\n\n' +
         '**Sistema de economía:**\n' +
         '• Gana DS6 Coins chateando, con `!daily` y `!trabajo`\n' +
         '• Úsalos en sorteos y más funciones\n\n' +
         '**Sistema de niveles:**\n' +
         '• Gana XP por cada mensaje enviado\n' +
         '• Sube de nivel y desbloquea roles especiales\n\n' +
-        '**Soporte:** Escríbele a **Daddy** en Discord o visita [ds6music.com](https://ds6music.com)'
+        '**Personalizar mensajes:**\n' +
+        '• `!editar bienvenida [texto]` — mensaje de bienvenida\n' +
+        '• `!editar despedida [texto]` — mensaje de despedida\n' +
+        '• `!editar reglas [texto]` — reglas del servidor\n' +
+        '• `!editar anuncio [texto]` — plantilla de anuncios\n' +
+        '• `!editar ver` — ver todos los mensajes configurados\n\n' +
+        '**Soporte:** Escíribele a **Daddy** en Discord o visita [ds6music.com](https://ds6music.com)'
       )
       .setColor(0x8B0000)
       .setFooter({ text: 'DS6 Bot v3.0 • Desarrollado por Daddy • ds6music.com' });
@@ -3079,7 +3954,7 @@ client.on(Events.MessageCreate, async (message) => {
         { name: '⏱️ Uptime', value: `**${days}d ${hours}h ${mins}m**`, inline: true },
         { name: '🏓 Ping', value: `**${Math.round(client.ws.ping)}ms**`, inline: true },
         { name: '📦 Versión', value: '**v3.0**', inline: true },
-        { name: '👑 Desarrollador', value: '**Daddy** — Senior Dev & Fundador', inline: true },
+        { name: '🤖 DS6 Bot', value: 'Bot multi-servidor v3.0', inline: true },
         { name: '🔗 Web', value: '[ds6music.com](https://ds6music.com)', inline: false },
       )
       .setColor(0x8B0000)
@@ -3095,7 +3970,7 @@ client.on(Events.MessageCreate, async (message) => {
         '¡Agrega el bot a tu servidor de Discord!\n\n' +
         '🔗 **[Haz clic aquí para agregar el bot](https://discord.com/oauth2/authorize?client_id=1503654573615612065&scope=bot+applications.commands&permissions=8)**\n\n' +
         'Una vez agregado, usa `!setup` para configurarlo automáticamente.\n\n' +
-        '**Desarrollado por:** 👑 **Daddy** — Senior Dev & Fundador de DS6Music\n' +
+        '**DS6 Bot v3.0** — Bot multi-servidor\n' +
         '**Web:** [ds6music.com](https://ds6music.com)'
       )
       .setColor(0x8B0000)
